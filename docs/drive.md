@@ -180,7 +180,8 @@ stands on the terrain or on the road profile.
     ≥ min(7 m, length / 15) under it (urban underpasses). `pathY` = the solved heights of the route's nodes, so
     roads meet the route at the same height.
   - Conforming: flat ground at road −0.3 m over `width / 2` + 2 m shoulder + 2 m (so the 7.8 m grid can't poke
-    through a road edge), 1:2 slopes beyond; the route and higher classes win where slopes overlap. Bridges trim
+    through a road edge), 1:2 slopes beyond for up to 80 m (cuts / fills deeper than 40 m end in a step); the route
+    and higher classes win where slopes overlap. Tiles agree exactly on shared edges (the build asserts it). Bridges trim
     the natural ground only where it comes within 1.5 m of the deck; no cut beyond a road end at a tunnel portal.
   - `route.json` `terrain` also has `attribution`. Building `baseY` = the minimum of the conformed grid at the
     footprint's vertices and centroid (sampled in the building's own tile, clamped).

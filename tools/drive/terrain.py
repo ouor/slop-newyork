@@ -385,7 +385,7 @@ def conform(x0, z0, size, ground, roads):
     gz = z0 + np.arange(TILE_N) * step
     H = ground.astype(float).copy()
     for r in roads:
-        P, Y, reach = r['pts'], r['ys'], r['reach']
+        P, Y, reach = r['pts'], r['ys'], r['half'] + r['reach']   # reach: from the centreline
         a, b = P[:-1], P[1:]
         sel = ((np.maximum(a[:, 0], b[:, 0]) > x0 - reach) & (np.minimum(a[:, 0], b[:, 0]) < x0 + size + reach) &
                (np.maximum(a[:, 1], b[:, 1]) > z0 - reach) & (np.minimum(a[:, 1], b[:, 1]) < z0 + size + reach))
@@ -411,7 +411,7 @@ def conform(x0, z0, size, ground, roads):
         dist = np.sqrt(dist2[rows, k])
         tk = t[rows, k]
         y = ya[k] + tk * (yb[k] - ya[k]) - ROAD_DROP
-        m = dist < r['half'] + reach
+        m = dist < reach
         if r['portal0']:
             m &= ~((segs[k] == 0) & (t_raw[rows, k] < 0))
         if r['portal1']:

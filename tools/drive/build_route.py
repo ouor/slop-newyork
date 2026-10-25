@@ -683,7 +683,7 @@ def build_terrain(args, frame, out, path, refs, segments, signals, tiles, roads)
                 tile['roads'].append({**p, 'pts': flat([q[:2] for q in piece]), 'ys': [r2(q[2]) for q in piece]})
 
     log('terrain: conformed tile grids')
-    REACH = 120.0
+    REACH = 80.0   # m beyond the flat zone: cuts / fills up to 40 m deep blend in (deeper ones end in a step)
     conform_ways = []   # (priority, way) for every road the ground meets
     for r in roads:
         p = r['props']
@@ -700,8 +700,10 @@ def build_terrain(args, frame, out, path, refs, segments, signals, tiles, roads)
     by_tile = {}
     for _prio, w in conform_ways:
         w['half'] += terrain.SHOULDER + terrain.GRID_SLACK
-        w['ymin'], w['ymax'] = float(w['ys'].min()), float(w['ys'].max())
-        (x0, z0), (x1, z1) = w['pts'].min(axis=0) - REACH, w['pts'].max(axis=0) + REACH
+        # one reach everywhere: neighbouring tiles must compute identical heights on their shared edge
+        w['reach'] = REACH
+        ext = w['half'] + REACH
+        (x0, z0), (x1, z1) = w['pts'].min(axis=0) - ext, w['pts'].max(axis=0) + ext
         for tx in range(math.floor(x0 / TILE), math.floor(x1 / TILE) + 1):
             for tz in range(math.floor(z0 / TILE), math.floor(z1 / TILE) + 1):
                 if tiles.get(tx, tz) is not None:
@@ -712,16 +714,21 @@ def build_terrain(args, frame, out, path, refs, segments, signals, tiles, roads)
         tx0, tz0 = tile['tx'] * TILE, tile['tz'] * TILE
         gx, gz = np.meshgrid(tx0 + np.arange(n) * TILE / (n - 1), tz0 + np.arange(n) * TILE / (n - 1))
         G = dem.ground(gx.ravel(), gz.ravel()).reshape(n, n)
-        gmin, gmax = float(G.min()), float(G.max())
-        ways = by_tile.get(key, [])
-        for w in ways:  # reach where the 1:2 slopes can still differ from this tile's ground: no step at its edge
-            w['reach'] = min(REACH, 2 * max(gmax - w['ymin'], w['ymax'] - gmin, 0) + 2)
-        grids[key] = terrain.conform(tx0, tz0, TILE, G, ways)
+        grids[key] = terrain.conform(tx0, tz0, TILE, G, by_tile.get(key, []))
         for b in tile['buildings']:
             # shortcut: footprints reaching into the next tile are sampled clamped to this tile's grid
             bx, bz = b['pts'][0::2], b['pts'][1::2]
             b['baseY'] = r1(float(terrain.sample_grid(grids[key], tx0, tz0, TILE,
                                                       bx + [sum(bx) / len(bx)], bz + [sum(bz) / len(bz)]).min()))
+
+    seam = 0.0   # neighbouring grids share their edge samples: they must agree
+    for key, tile in tiles.data.items():
+        for dx, dz, a, b in ((1, 0, np.s_[:, -1], np.s_[:, 0]), (0, 1, np.s_[-1, :], np.s_[0, :])):
+            other = grids.get(key_of(tile['tx'] + dx, tile['tz'] + dz))
+            if other is not None:
+                seam = max(seam, float(np.abs(grids[key][a] - other[b]).max()))
+    log(f'  tile edge mismatch {seam:.3f} m')
+    assert seam < 0.01, 'conformed tile grids disagree on a shared edge'
 
     log('terrain: far grid')
     fgx, fgz = np.meshgrid(fx0 + np.arange(nx) * step, fz0 + np.arange(nz) * step)
