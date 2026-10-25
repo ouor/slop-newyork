@@ -1,0 +1,49 @@
+/* css/drive.css — Korea Drive HUD on top of the shared tokens in style.css */
+
+#canvas-container { position: fixed; inset: 0; }
+
+.drive-top {
+  position: fixed;
+  top: max(var(--edge), env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 32px));
+}
+.drive-route { padding: 10px 14px; display: grid; gap: 6px; }
+.drive-route-name { font-weight: 700; font-size: 15px; color: var(--text); }
+.drive-progress { height: 4px; border-radius: 2px; background: var(--divider); overflow: hidden; }
+.drive-progress span { display: block; height: 100%; width: 0; background: var(--taxi); }
+.drive-stats { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.drive-stats b { color: var(--text); font-size: 14px; }
+
+.drive-controls {
+  position: fixed;
+  right: max(var(--edge), env(safe-area-inset-right));
+  bottom: max(var(--edge), env(safe-area-inset-bottom));
+  width: min(360px, calc(100vw - 32px));
+  padding: 12px 14px;
+  display: grid;
+  gap: 10px;
+}
+.drive-row { display: grid; grid-template-columns: 64px 1fr; align-items: center; gap: 10px; font-size: 12px; color: var(--text-2); }
+.drive-label b { color: var(--text); font-variant-numeric: tabular-nums; }
+.drive-row input[type="range"] { width: 100%; accent-color: var(--taxi); }
+.drive-seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.drive-seg button {
+  flex: 1 0 auto;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+}
+.drive-seg button:hover { background: var(--hover); color: var(--text); }
+.drive-seg button:focus-visible { outline: 2px solid var(--taxi); outline-offset: 1px; }
+.drive-seg button.active { background: var(--taxi); color: var(--taxi-ink); border-color: var(--taxi); font-weight: 600; }
+
+@media (max-width: 640px) {
+  .drive-controls { left: 16px; right: 16px; width: auto; }
+}

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Korea Drive</title>
+  <link rel="icon" href="data:," />
+  <meta name="description" content="Drive a real Korean route built procedurally from OpenStreetMap, seen from inside the car, at any time of day and in rain." />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/build/three.webgpu.js",
+        "three/webgpu": "./vendor/three/build/three.webgpu.js",
+        "three/tsl": "./vendor/three/build/three.tsl.js",
+        "three/addons/": "./vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module" src="./js/drive/main.js"></script>
+  <link rel="stylesheet" href="./css/style.css" />
+  <link rel="stylesheet" href="./css/drive.css" />
+</head>
+<body>
+  <div id="loading-overlay" role="status" aria-live="polite">
+    <div class="loader">
+      <span class="mta-bullet loader-bullet" aria-hidden="true">KR</span>
+      <div class="loader-title">Korea Drive</div>
+      <div class="loader-track is-indeterminate" aria-hidden="true"><span id="loading-progress" class="loader-fill"></span></div>
+      <div id="loading-status">Initializing WebGPURenderer…</div>
+    </div>
+  </div>
+
+  <main id="canvas-container" aria-label="Korea Drive 3D view"></main>
+
+  <header class="hud drive-top">
+    <div class="panel drive-route">
+      <div id="route-name" class="drive-route-name">—</div>
+      <div class="drive-progress" aria-hidden="true"><span id="route-progress"></span></div>
+      <div class="drive-stats">
+        <span id="route-road">—</span>
+        <span><b id="hud-speed">0</b> km/h</span>
+        <span id="route-remaining">—</span>
+        <span id="hud-fps" title="Frames per second">—</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="hud drive-controls panel" aria-label="Drive controls">
+    <label class="drive-row">
+      <span class="drive-label">시간 <b id="time-label">13:00</b></span>
+      <input id="time-slider" type="range" min="0" max="24" step="0.05" value="13" />
+    </label>
+    <div class="drive-row" role="group" aria-label="Weather">
+      <span class="drive-label">날씨</span>
+      <div class="drive-seg">
+        <button type="button" data-weather="clear" class="active">맑음</button>
+        <button type="button" data-weather="overcast">흐림</button>
+        <button type="button" data-weather="rain">비</button>
+      </div>
+    </div>
+    <div class="drive-row" role="group" aria-label="View">
+      <span class="drive-label">시점</span>
+      <div class="drive-seg">
+        <button type="button" data-view="driver" class="active">운전석</button>
+        <button type="button" data-view="passenger-side">조수석 창</button>
+        <button type="button" data-view="rear-seat">뒷좌석</button>
+        <button type="button" data-view="chase">외부</button>
+      </div>
+    </div>
+    <div class="drive-row" role="group" aria-label="Playback speed">
+      <span class="drive-label">배속</span>
+      <div class="drive-seg">
+        <button type="button" data-speed="0">❚❚</button>
+        <button type="button" data-speed="1" class="active">1×</button>
+        <button type="button" data-speed="4">4×</button>
+        <button type="button" data-speed="16">16×</button>
+        <button type="button" data-speed="60">60×</button>
+      </div>
+    </div>
+    <label class="drive-row">
+      <span class="drive-label">위치</span>
+      <input id="seek-slider" type="range" min="0" max="1" step="0.001" value="0" />
+    </label>
+  </nav>
+</body>
+</html>
