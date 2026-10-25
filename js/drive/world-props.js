@@ -5,7 +5,9 @@ import { MeshData, mulberry32, hashId, pointInPolygon, ringArea, ringBounds } fr
 // js/drive/world-props.js
 // Street furniture of one tile, instanced on templates built once:
 // - street trees (London plane & elm-like 느티나무 from js/trees.js) along the sidewalks every ~9–12 m, the mapped
-//   trees, and groves scattered through parks & woods; two levels of detail per 125 m cell, picked in update()
+//   trees, and groves scattered through parks (and through woods in city tiles: countryside woods are world-rural.js's);
+//   two levels of detail per 125 m cell, picked in update()
+// Everything stands on the sidewalk / road profile it was placed along, or on the tile's ground (heightAt).
 // - tall single-arm street lamps along the main roads and on the bridge parapets, heads lit at night
 // - cantilever traffic signals with horizontal heads at the approaches of main-road intersections & mapped signals
 // - concrete utility poles with sagging wires along the small streets (characteristic Seoul overhead cabling)
@@ -97,7 +99,7 @@ const yawOf = (ax, az) => Math.atan2(-az, ax);
  * Builds the tile's props from the road analysis (world-roads.js) and areas. Returns
  * { group, update(cameraPosition), dispose() }; a generator so the builder can slice it.
  */
-function* buildProps(tile, roads, materials, buildingsBlock) {
+function* buildProps(tile, roads, materials, buildingsBlock, heightAt = () => 0) {
   const T = getTemplates(materials.leafAtlas);
   const group = new THREE.Group();
   group.name = `Props_${tile.key}`;
@@ -114,38 +116,40 @@ function* buildProps(tile, roads, materials, buildingsBlock) {
     const id = w.road.src.id;
     const spacing = 9 + (hashId(id, w.side) % 1000) / 333;
     if (w.sw >= 2.5 && w.s % spacing < 3 && !grid.covering(w.x, w.z, 0.6)) {
-      trees.push({ x: w.x, z: w.z, sp: hashId(id, 3) % 5 < 3 ? 0 : 1, seed: hashId(Math.round(w.x * 10), Math.round(w.z * 10)) });
+      trees.push({ x: w.x, y: w.y, z: w.z, sp: hashId(id, 3) % 5 < 3 ? 0 : 1, seed: hashId(Math.round(w.x * 10), Math.round(w.z * 10)) });
     }
     // One shelter every ~350 m of main road, on the right-hand sidewalk
     if ((w.road.hw === 'primary' || w.road.hw === 'secondary') && w.side > 0 && w.sw >= 3.5 && w.s % 350 >= 170 && w.s % 350 < 173 &&
       hashId(id, Math.floor(w.s / 350)) % 3 === 0) {
       const yaw = yawOf(w.dx, w.dz);
       const ox = w.x + w.rx * 0.4, oz = w.z + w.rz * 0.4;
+      const y = w.y;
       shelters.set('tint', 0.32, 0.36, 0.42);
-      shelters.box(ox, 2.5, oz, 4.2, 0.12, 1.7, yaw);
-      shelters.box(ox + w.rx * 0.75 + w.dx * 2, 0, oz + w.rz * 0.75 + w.dz * 2, 0.1, 2.5, 0.1, yaw);
-      shelters.box(ox + w.rx * 0.75 - w.dx * 2, 0, oz + w.rz * 0.75 - w.dz * 2, 0.1, 2.5, 0.1, yaw);
+      shelters.box(ox, y + 2.5, oz, 4.2, 0.12, 1.7, yaw);
+      shelters.box(ox + w.rx * 0.75 + w.dx * 2, y, oz + w.rz * 0.75 + w.dz * 2, 0.1, 2.5, 0.1, yaw);
+      shelters.box(ox + w.rx * 0.75 - w.dx * 2, y, oz + w.rz * 0.75 - w.dz * 2, 0.1, 2.5, 0.1, yaw);
       shelters.set('tint', 0.55, 0.66, 0.72);
-      shelters.box(ox + w.rx * 0.8, 0.3, oz + w.rz * 0.8, 4.0, 2.1, 0.05, yaw);
+      shelters.box(ox + w.rx * 0.8, y + 0.3, oz + w.rz * 0.8, 4.0, 2.1, 0.05, yaw);
       shelters.set('tint', 0.4, 0.42, 0.45);
-      shelters.box(ox + w.rx * 0.5, 0.15, oz + w.rz * 0.5, 2.6, 0.3, 0.4, yaw);
+      shelters.box(ox + w.rx * 0.5, y + 0.15, oz + w.rz * 0.5, 2.6, 0.3, 0.4, yaw);
     }
   }
   for (const l of lampSites) {
     if (!l.bridge && (!l.road || !(l.road.hw === 'primary' || l.road.hw === 'secondary' || l.road.hw === 'tertiary' || l.road.hw === 'trunk'))) continue;
     if (!l.bridge && (l.s + (hashId(l.road.src.id, l.side) % 30)) % 32 >= 3) continue;
-    lamps.push({ x: l.x, y: l.y || 0.15, z: l.z, yaw: yawOf(l.ax, l.az) });
+    lamps.push({ x: l.x, y: l.y, z: l.z, yaw: yawOf(l.ax, l.az) });
   }
   for (const p of tile.points || []) {
-    if (p.kind === 'tree') trees.push({ x: p.x, z: p.z, sp: 0, seed: hashId(Math.round(p.x * 10), Math.round(p.z * 10)) });
-    else if (p.kind === 'street_lamp' && !lamps.some((l) => Math.hypot(l.x - p.x, l.z - p.z) < 8)) lamps.push({ x: p.x, z: p.z, y: 0.15, yaw: 0 });
+    if (p.kind === 'tree') trees.push({ x: p.x, y: heightAt(p.x, p.z), z: p.z, sp: 0, seed: hashId(Math.round(p.x * 10), Math.round(p.z * 10)) });
+    else if (p.kind === 'street_lamp' && !lamps.some((l) => Math.hypot(l.x - p.x, l.z - p.z) < 8)) lamps.push({ x: p.x, z: p.z, y: heightAt(p.x, p.z) + 0.15, yaw: 0 });
   }
   yield;
 
-  // Groves in parks & woods (seeded per area, capped)
+  // Groves in parks, and woods in the city (seeded per area, capped)
+  const city = (tile.buildings || []).length >= 30;
   for (const a of tile.areas || []) {
     const kind = a.kind;
-    const dense = kind === 'wood' || kind === 'forest';
+    const dense = city && (kind === 'wood' || kind === 'forest');
     if (!(dense || kind === 'park' || kind === 'garden' || kind === 'grass' || kind === 'greenery' || kind === 'military')) continue;
     const area = Math.abs(ringArea(a.pts));
     const box = ringBounds(a.pts);
@@ -154,7 +158,7 @@ function* buildProps(tile, roads, materials, buildingsBlock) {
     for (let k = 0, tries = 0; k < want && tries < want * 3; tries++) {
       const x = box.minX + rng() * (box.maxX - box.minX), z = box.minZ + rng() * (box.maxZ - box.minZ);
       if (!pointInPolygon(a.pts, a.holes, x, z) || blocked(x, z)) continue;
-      trees.push({ x, z, sp: rng() < 0.5 ? 0 : 1, seed: Math.floor(rng() * 1e9), park: true });
+      trees.push({ x, y: heightAt(x, z), z, sp: rng() < 0.5 ? 0 : 1, seed: Math.floor(rng() * 1e9), park: true });
       k++;
     }
   }
@@ -168,7 +172,7 @@ function* buildProps(tile, roads, materials, buildingsBlock) {
     if (!cells.has(key)) cells.set(key, { box: new THREE.Box3(), lists: [[], []], meshes: [] });
     const c = cells.get(key);
     c.lists[t.sp].push(t);
-    c.box.expandByPoint(new THREE.Vector3(t.x, 0, t.z));
+    c.box.expandByPoint(new THREE.Vector3(t.x, t.y, t.z));
   }
   const treeCells = [];
   for (const c of cells.values()) {
@@ -183,7 +187,7 @@ function* buildProps(tile, roads, materials, buildingsBlock) {
         const s = (t.park ? 0.75 : 0.62) + r() * 0.25;
         tint.setHex(TREE_SPECIES[speciesIndex].tints[Math.floor(r() * 2.999)]).multiplyScalar(0.82 + r() * 0.36);
         data.set([tint.r, tint.g, tint.b, speciesIndex + r() * 0.999], i * 4);
-        return { x: t.x, y: t.park ? 0 : 0.15, z: t.z, yaw: r() * Math.PI * 2, s };
+        return { x: t.x, y: t.y, z: t.z, yaw: r() * Math.PI * 2, s };
       });
       for (let lod = 0; lod < 2; lod++) {
         const src = T.tree[sp][lod];
@@ -211,7 +215,7 @@ function* buildProps(tile, roads, materials, buildingsBlock) {
     near.add(instanced(T.lamp, materials.prop, lamps, 'Lamps'));
     near.add(instanced(T.lampHead, materials.glow, lamps, 'LampHeads'));
   }
-  const signals = signalSites.map((s) => ({ x: s.x, y: 0.15, z: s.z, yaw: yawOf(s.tz, -s.tx) }));
+  const signals = signalSites.map((s) => ({ x: s.x, y: s.y, z: s.z, yaw: yawOf(s.tz, -s.tx) }));
   if (signals.length) {
     near.add(instanced(T.signal, materials.prop, signals, 'Signals'));
     near.add(instanced(T.lenses, materials.glow, signals, 'SignalLenses'));
@@ -235,19 +239,20 @@ function* buildProps(tile, roads, materials, buildingsBlock) {
         const t = s - acc;
         const x = ax + dx * t - dz * side * (r.half + 0.45), z = az + dz * t + dx * side * (r.half + 0.45);
         if (grid.covering(x, z, 0.3)) { prev = null; continue; }
-        poles.push({ x, z, yaw: yawOf(-dz * side, dx * side) });
+        const y = heightAt(x, z);
+        poles.push({ x, y, z, yaw: yawOf(-dz * side, dx * side) });
         if (prev) {
           for (const [h, o] of [[9.75, 0.75], [9.75, -0.75], [8.55, 0.5]]) {
             const ox = -dz * o, oz = dx * o;
             for (let k = 0; k < 6; k++) {
               const u0 = k / 6, u1 = (k + 1) / 6;
-              const y0 = h - Math.sin(u0 * Math.PI) * 0.55, y1 = h - Math.sin(u1 * Math.PI) * 0.55;
+              const y0 = prev.y + (y - prev.y) * u0 + h - Math.sin(u0 * Math.PI) * 0.55, y1 = prev.y + (y - prev.y) * u1 + h - Math.sin(u1 * Math.PI) * 0.55;
               wire.push(prev.x + (x - prev.x) * u0 + ox, y0, prev.z + (z - prev.z) * u0 + oz,
                 prev.x + (x - prev.x) * u1 + ox, y1, prev.z + (z - prev.z) * u1 + oz);
             }
           }
         }
-        prev = { x, z };
+        prev = { x, y, z };
       }
       acc += len;
     }

@@ -208,7 +208,7 @@ function addFlatPolygon(mesh, outer, holes, y, triangulate) {
 // Walls of a footprint ring from y0 to y1, facing out of the solid (into the courtyard for holes). uv = (metres from
 // the wall's own start corner, metres above the building's base y0); onWall(len) runs before each wall is written so
 // the caller can set per-wall attributes. Edges shorter than 5 cm are skipped.
-function addRingWalls(mesh, ring, isHole, y0, y1, onWall) {
+function addRingWalls(mesh, ring, isHole, y0, y1, onWall, v0 = 0) {
   const n = ring.length >> 1;
   const sign = Math.sign(ringArea(ring)) * (isHole ? -1 : 1);
   for (let i = 0; i < n; i++) {
@@ -218,8 +218,8 @@ function addRingWalls(mesh, ring, isHole, y0, y1, onWall) {
     if (len < 0.05) continue;
     const nx = ((bz - az) / len) * sign, nz = (-(bx - ax) / len) * sign;
     if (onWall) onWall(len, i);
-    const h = y1 - y0;
-    mesh.quad([[ax, y0, az], [bx, y0, bz], [bx, y1, bz], [ax, y1, az]], nx, 0, nz, mesh.cur.uv ? [[0, 0], [len, 0], [len, h], [0, h]] : null);
+    const v1 = v0 + y1 - y0;
+    mesh.quad([[ax, y0, az], [bx, y0, bz], [bx, y1, bz], [ax, y1, az]], nx, 0, nz, mesh.cur.uv ? [[0, v0], [len, v0], [len, v1], [0, v1]] : null);
   }
 }
 
@@ -229,8 +229,9 @@ function addRingWalls(mesh, ring, isHole, y0, y1, onWall) {
 
 // Resamples a polyline (flat [x, z, …]) at most `step` m apart, keeping every original vertex. Each sample:
 // { x, z, s (metres from the start), dx, dz (unit direction), rx, rz (unit right = (-dz, dx)), miter (offset scale) }.
-// Miter joins at vertices, the scale capped at 2 so hairpins don't spike.
-function resamplePolyline(pts, step) {
+// Miter joins at vertices, the scale capped at 2 so hairpins don't spike. With `ys` (elevation per point, phase 2 tile
+// roads) every sample also gets `y`, linear between points (0 without).
+function resamplePolyline(pts, step, ys = null) {
   const n = pts.length >> 1;
   const out = [];
   if (n < 2) return out;
@@ -240,12 +241,13 @@ function resamplePolyline(pts, step) {
     const len = Math.hypot(bx - ax, bz - az);
     if (len < 1e-6) continue;
     const k = Math.max(1, Math.ceil(len / step));
-    for (let j = 0; j < k; j++) out.push({ x: ax + ((bx - ax) * j) / k, z: az + ((bz - az) * j) / k, s: s + (len * j) / k, dx: (bx - ax) / len, dz: (bz - az) / len, vertex: j === 0 ? i : -1 });
+    const ya = ys ? ys[i] : 0, yb = ys ? ys[i + 1] : 0;
+    for (let j = 0; j < k; j++) out.push({ x: ax + ((bx - ax) * j) / k, y: ya + ((yb - ya) * j) / k, z: az + ((bz - az) * j) / k, s: s + (len * j) / k, dx: (bx - ax) / len, dz: (bz - az) / len, vertex: j === 0 ? i : -1 });
     s += len;
   }
   if (!out.length) return out;
   const last = out[out.length - 1];
-  out.push({ x: pts[n * 2 - 2], z: pts[n * 2 - 1], s, dx: last.dx, dz: last.dz, vertex: n - 1 });
+  out.push({ x: pts[n * 2 - 2], y: ys ? ys[n - 1] : 0, z: pts[n * 2 - 1], s, dx: last.dx, dz: last.dz, vertex: n - 1 });
   // Join directions at vertices: average of the incoming and outgoing edge, offset scaled by 1 / cos(half angle)
   for (let i = 0; i < out.length; i++) {
     const p = out[i];
@@ -271,20 +273,22 @@ function resamplePolyline(pts, step) {
   return out;
 }
 
-// Point `dist` metres along a polyline from vertex i, walking forward (dir = 1) or back (dir = -1); null past its end
-function walkPolyline(pts, i, dir, dist) {
+// Point `dist` metres along a polyline from vertex i, walking forward (dir = 1) or back (dir = -1); null past its end.
+// `y` is interpolated from `ys` when given (0 without).
+function walkPolyline(pts, i, dir, dist, ys = null) {
   const n = pts.length >> 1;
-  let x = pts[i * 2], z = pts[i * 2 + 1];
+  let x = pts[i * 2], z = pts[i * 2 + 1], y = ys ? ys[i] : 0;
   for (let j = i + dir; j >= 0 && j < n; j += dir) {
-    const nx = pts[j * 2], nz = pts[j * 2 + 1];
+    const nx = pts[j * 2], nz = pts[j * 2 + 1], ny = ys ? ys[j] : 0;
     const len = Math.hypot(nx - x, nz - z);
     if (len >= dist && len > 1e-6) {
       const t = dist / len;
-      return { x: x + (nx - x) * t, z: z + (nz - z) * t, dx: (nx - x) / len, dz: (nz - z) / len };
+      return { x: x + (nx - x) * t, y: y + (ny - y) * t, z: z + (nz - z) * t, dx: (nx - x) / len, dz: (nz - z) / len };
     }
     dist -= len;
     x = nx;
     z = nz;
+    y = ny;
   }
   return null;
 }

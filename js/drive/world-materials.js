@@ -21,7 +21,19 @@ import {
   mix,
   step,
   smoothstep,
-  fwidth
+  fwidth,
+  clamp,
+  normalize,
+  time,
+  uniformArray,
+  Loop,
+  If,
+  Discard,
+  mx_noise_float,
+  mx_noise_vec3,
+  normalWorldGeometry,
+  cameraPosition,
+  cameraViewMatrix
 } from 'three/tsl';
 import {
   cityUniforms,
@@ -29,10 +41,10 @@ import {
   createRoadPaintMaterial,
   createSidewalkMaterial,
   createCurbMaterial,
-  createWaterMaterial,
   createTreeMaterial
 } from '../tsl-materials.js';
 import { createLeafAtlas } from '../trees.js';
+import { tunnelUniforms } from './environment.js';
 
 // js/drive/world-materials.js
 // Materials shared by every Korea Drive tile, created once on first use. The roadway, lane paint, sidewalk, curb and
@@ -40,6 +52,8 @@ import { createLeafAtlas } from '../trees.js';
 // facade shader driven by per-vertex style attributes (one material for every building of every tile):
 //   bstyle = (style, storey height, seed, wall height), bwall = (wall length, accent), uv = metres along / up the wall
 // Styles (world-geometry.js STYLE): 0 아파트 slab · 1 다세대/빌라 · 2 상가 · 3 glass office · 4 school · 5 plain.
+// Phase 2: the terrain (landuse / slope shading, tunnel mouths cut out of it), rivers & reservoirs at any elevation,
+// tunnel linings and lamps lit by tunnelUniforms (environment.js), transparent noise-barrier panels.
 
 const hash21 = Fn(([p]) => fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453)));
 
@@ -180,18 +194,134 @@ function createTintMaterial({ roughness = 0.85, metalness = 0.0, noise = 0.12 } 
   return mat;
 }
 
-// Ground: per-vertex landuse tint with grain; the lowered river banks turn into a stone revetment
-function createGroundMaterial() {
+// Tunnel mouths cut out of the terrain (world-structures.js portals, the nearest MAX_PORTALS set by world-builder.js):
+// per portal vec4(x, z, dx, dz) (dx, dz into the tunnel) and vec4(road y, grade, half width, height); unused ones have
+// a negative half width
+const MAX_PORTALS = 16;
+const portalUniforms = uniformArray(Array.from({ length: MAX_PORTALS * 2 }, (_, k) => new THREE.Vector4(0, 0, k % 2 ? -1 : 1, 0)), 'vec4');
+
+// Terrain (world-terrain.js): per-vertex tint & land = (urban, farmland, forest, cut slope) weights, shaded by slope:
+// grain everywhere, a blotchy canopy over the woods, 논 / 밭 plots with their dikes on farmland, bare granite on very
+// steep ground, shotcrete with a 격자블록 frame on the road cuts; darker in rain. The hillside inside a tunnel mouth is
+// discarded (the portal's headwall and lining stand there).
+function createTerrainMaterial() {
   const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.95, metalness: 0.0 });
   const tint = srgb(attribute('tint', 'vec3'));
+  const land = attribute('land', 'vec4');
   mat.colorNode = Fn(() => {
     const xz = positionWorld.xz;
+    const y = positionWorld.y;
+    Loop(MAX_PORTALS, ({ i }) => {
+      const a = portalUniforms.element(i.mul(2));
+      const b = portalUniforms.element(i.mul(2).add(1));
+      const rel = xz.sub(a.xy);
+      const along = dot(rel, a.zw);
+      const lateral = abs(rel.x.mul(a.w).sub(rel.y.mul(a.z)));
+      const h = y.sub(b.x.add(b.y.mul(along)));
+      If(along.greaterThan(-10.0).and(along.lessThan(30.0)).and(lateral.lessThan(b.z)).and(h.greaterThan(0.05)).and(h.lessThan(b.w)), () => {
+        Discard();
+      });
+    });
+    const slope = float(1.0).sub(normalWorldGeometry.y);
     const grain = hash21(floor(xz.mul(2.3))).mul(0.08).add(hash21(floor(xz.mul(0.11))).mul(0.14)).add(0.89);
-    const bank = smoothstep(-0.15, -0.9, positionWorld.y);
-    const blocks = band(fract(positionWorld.y.mul(1.4).add(xz.x.mul(0.02))), 0.06, 0.94, 0.05).mul(0.15).add(0.85);
+    const c = tint.mul(grain).toVar();
+
+    // Woods: crowns ~6 m across in clumps, their shadows between
+    const crowns = mx_noise_float(vec3(xz.mul(0.17), 0.0)).mul(0.5).add(0.5);
+    const clumps = mx_noise_float(vec3(xz.mul(0.023), 4.1)).mul(0.5).add(0.5);
+    const canopy = mix(float(0.55), float(1.3), smoothstep(0.25, 0.8, crowns.mul(0.65).add(clumps.mul(0.35))));
+    c.assign(mix(c, c.mul(canopy).mul(vec3(0.95, 1.05, 0.9)), land.z));
+
+    // Farmland: plots of ~30 × 70 m, flat ones as 논 (green or ripening rice), sloping ones as 밭 in furrows
+    const plotSize = vec2(31.0, 67.0);
+    const plotUV = xz.div(plotSize);
+    const ph = hash21(floor(plotUV).add(0.37));
+    const rice = mix(color(0x55752e), color(0x8d8a43), step(0.72, ph));
+    const soil = mix(color(0x6e5a42), color(0x5d7a35), step(0.5, fract(ph.mul(5.3))));
+    const furrows = sin(xz.x.mul(2.4).add(ph.mul(20.0))).mul(0.12).add(0.94);
+    const paddy = smoothstep(0.03, 0.008, slope);
+    const pf = fract(plotUV);
+    const aaP = fwidth(plotUV).mul(1.5).add(0.0005);
+    const inPlot = band(pf.x, 0.6 / 31.0, 1.0 - 0.6 / 31.0, aaP.x).mul(band(pf.y, 0.6 / 67.0, 1.0 - 0.6 / 67.0, aaP.y));
+    const field = mix(color(0x6f8a45), mix(soil.mul(furrows), rice, paddy).mul(grain), inPlot.mul(0.8).add(0.2));
+    c.assign(mix(c, field, land.y));
+
+    // Bare rock where it is too steep for soil (not on the dressed cuts or in town)
+    const rockN = mx_noise_float(vec3(xz.mul(0.09), y.mul(0.09))).mul(0.5).add(0.5);
+    const rock = smoothstep(0.48, 0.68, slope.add(rockN.mul(0.12))).mul(float(1.0).sub(land.w)).mul(float(1.0).sub(land.x));
+    c.assign(mix(c, srgb(vec3(0.4, 0.39, 0.36)).mul(rockN.mul(0.3).add(0.8)), rock));
+
+    // Road cuts: a concrete grid frame (2.8 m along the contour × 2.5 m up), grass or shotcrete in its cells
+    const contour = normalize(vec2(normalWorldGeometry.z.negate(), normalWorldGeometry.x).add(vec2(0.0001, 0.0)));
+    const gridUV = vec2(dot(xz, contour).mul(0.36), y.mul(0.4));
+    const gf = fract(gridUV);
+    const aaG = fwidth(gridUV).add(0.002);
+    const frame = float(1.0).sub(band(gf.x, 0.1, 0.9, aaG.x).mul(band(gf.y, 0.1, 0.9, aaG.y)));
+    const grass = srgb(vec3(0.38, 0.45, 0.26)), shotcrete = srgb(vec3(0.5, 0.5, 0.47)), frameCol = srgb(vec3(0.58, 0.57, 0.54));
+    const cell = mix(grass, shotcrete, step(0.65, hash21(floor(gridUV).add(2.3))));
+    // Cells below a pixel settle to their mean, so the pattern can't alias into stripes at grazing angles
+    const coarse = smoothstep(0.15, 0.45, max(aaG.x, aaG.y));
+    const cutCol = mix(mix(cell, frameCol, frame.mul(0.85)), mix(mix(grass, shotcrete, 0.35), frameCol, 0.3), coarse);
+    c.assign(mix(c, cutCol.mul(grain), land.w));
+
     const wetFilm = smoothstep(0.2, 0.8, cityUniforms.uRoadWetness);
-    return mix(tint.mul(grain), color(0x8a877c).mul(blocks), bank).mul(mix(float(1.0), float(0.8), wetFilm));
+    return c.mul(mix(float(1.0), float(0.72), wetFilm));
   })();
+  mat.roughnessNode = mix(float(0.95), float(0.7), smoothstep(0.2, 0.8, cityUniforms.uRoadWetness));
+  return mat;
+}
+
+// Rivers, reservoirs, ponds and the sea at any elevation: drifting wave normals from MaterialX noise, Fresnel through
+// metalness (as js/tsl-materials.js's estuary, so SSR mirrors the banks), a murky green-grey body
+function createWaterMaterial() {
+  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.12, metalness: 0.0 });
+  const p = positionWorld.xz;
+  const a = mx_noise_vec3(vec3(p.mul(0.07), time.mul(0.22)));
+  const b = mx_noise_vec3(vec3(p.mul(0.29).add(17.0), time.mul(0.55)));
+  const slope = a.xy.mul(0.05).add(b.xy.mul(0.025)).mul(mix(float(1.0), float(1.8), cityUniforms.uRoadWetness));
+  const n = normalize(vec3(slope.x.negate(), 1.0, slope.y.negate()));
+  mat.normalNode = cameraViewMatrix.transformDirection(n);
+  const viewDir = normalize(cameraPosition.sub(positionWorld));
+  const fresnel = pow(float(1.0).sub(clamp(dot(n, viewDir), 0.0, 1.0)), 5.0).mul(0.98).add(0.02);
+  mat.metalnessNode = clamp(fresnel.mul(1.6), 0.0, 0.9);
+  const silt = mx_noise_float(vec3(p.mul(0.004), 7.3)).mul(0.5).add(0.5);
+  mat.colorNode = mix(color(0x18302c), color(0x34432f), silt);
+  return mat;
+}
+
+// Tunnel lining (world-structures.js; uv = metres along, metres round the section from the left wall foot, folded so
+// both walls read the same): light panels up to 2.6 m with their joints, dark sooty shotcrete above; lit by the lamp
+// rows (tunnelUniforms.uLampColor) whatever the sun does, a little brighter under each lamp
+function createTunnelLiningMaterial() {
+  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.75, metalness: 0.0, side: THREE.DoubleSide });
+  const u = uv().x;
+  const v = uv().y;
+  const panelUV = vec2(u.div(1.2), v.div(0.6));
+  const aa = fwidth(panelUV).add(0.002);
+  const joints = band(fract(panelUV.x), 0.03, 0.97, aa.x).mul(band(fract(panelUV.y), 0.04, 0.96, aa.y));
+  const panels = mix(color(0x6f6f6a), color(0xd8d6cf), joints.mul(0.85).add(0.15));
+  const soot = mx_noise_float(vec3(u.mul(0.15), v.mul(0.4), 1.7)).mul(0.5).add(0.5);
+  const shotcrete = mix(color(0x2a2a29), color(0x484744), soot);
+  const isPanel = smoothstep(2.65, 2.55, v);
+  const albedo = mix(shotcrete, panels, isPanel);
+  mat.colorNode = albedo;
+  const pool = cos(u.mul(Math.PI / 3)).mul(0.25).add(0.75); // lamps every 6 m
+  mat.emissiveNode = albedo.mul(tunnelUniforms.uLampColor).mul(pool).mul(mix(float(0.35), float(0.22), isPanel));
+  return mat;
+}
+
+function createTunnelLampMaterial() {
+  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.4, metalness: 0.0 });
+  mat.colorNode = vec3(0.1);
+  mat.emissiveNode = tunnelUniforms.uLampColor.mul(5.0);
+  return mat;
+}
+
+// Noise-barrier panels: clear, slightly blue
+function createGlassMaterial() {
+  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.08, metalness: 0.0, transparent: true, depthWrite: false, side: THREE.DoubleSide });
+  mat.colorNode = srgb(attribute('tint', 'vec3'));
+  mat.opacity = 0.32;
   return mat;
 }
 
@@ -216,7 +346,10 @@ function getWorldMaterials() {
     sidewalk: createSidewalkMaterial(),
     curb: createCurbMaterial(),
     water: createWaterMaterial(),
-    ground: createGroundMaterial(),
+    terrain: createTerrainMaterial(),
+    lining: createTunnelLiningMaterial(),
+    tunnelLamp: createTunnelLampMaterial(),
+    glass: createGlassMaterial(),
     facade: createFacadeMaterial(),
     roof: createTintMaterial({ roughness: 0.9 }),
     prop: createTintMaterial({ roughness: 0.55, metalness: 0.25, noise: 0.04 }),
@@ -229,4 +362,4 @@ function getWorldMaterials() {
   return shared;
 }
 
-export { getWorldMaterials };
+export { getWorldMaterials, portalUniforms, MAX_PORTALS };

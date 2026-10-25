@@ -7,7 +7,7 @@ const { loadModule } = require('./helpers/module.cjs');
 const read = (name) => readFileSync(join(__dirname, '../js/drive', name), 'utf8');
 const geo = loadModule(read('world-geometry.js'), { filename: 'world-geometry.js' });
 const roadsModule = loadModule(read('world-roads.js'), { imports: { './world-geometry.js': geo }, filename: 'world-roads.js' });
-const groundModule = loadModule(read('world-ground.js'), { imports: { './world-geometry.js': geo }, filename: 'world-ground.js' });
+const terrainModule = loadModule(read('world-terrain.js'), { imports: { './world-geometry.js': geo }, filename: 'world-terrain.js' });
 
 // Fan triangulation: enough for the convex test shapes (the app uses THREE.ShapeUtils / earcut)
 const fan = (outer) => {
@@ -130,7 +130,7 @@ test('building estimates are deterministic per id and respect tagged heights and
   assert.equal(geo.estimateBuilding({ ...b, pts: box(20, 15) }, { nearMajor: 10 }).style, geo.STYLE.shop);
 });
 
-test('every route tile builds roads & ground, and the asphalt covers the whole route centreline', () => {
+test('every route tile builds roads & terrain, and the asphalt covers the whole route centreline', () => {
   const dir = join(__dirname, '../data/drive/seoul-station-gangnam');
   const route = JSON.parse(readFileSync(join(dir, 'route.json'), 'utf8'));
   const routeGrid = new geo.SegmentGrid(20);
@@ -138,13 +138,15 @@ test('every route tile builds roads & ground, and the asphalt covers the whole r
   const grids = new Map();
   for (const file of readdirSync(join(dir, 'tiles')).filter((f) => f.endsWith('.json'))) { // skip <key>.terrain.bin
     const tile = JSON.parse(readFileSync(join(dir, 'tiles', file), 'utf8'));
+    tile.terrain = new Int16Array(Uint8Array.from(readFileSync(join(dir, 'tiles', file.replace('.json', '.terrain.bin')))).buffer);
     const roads = finish(roadsModule.buildRoads(tile, routeGrid));
-    grids.set(`${tile.tx}_${tile.tz}`, roads.grid);
+    grids.set(`${tile.tx}_${tile.tz}`, [roads.grid, roads.tunnelGrid]);
     const { position, index } = roads.meshes.road.arrays();
     for (const v of position) assert.ok(Number.isFinite(v));
     for (const i of index) assert.ok(i < position.length / 3);
-    const ground = finish(groundModule.buildGround(tile, fan));
-    assert.ok(!ground.ground.empty);
+    const terrain = finish(terrainModule.buildTerrain(tile, { roads: roads.roads, triangulate: fan }));
+    assert.ok(terrain.index[0].length > 0);
+    for (const v of terrain.position) assert.ok(Number.isFinite(v));
   }
   // Route vertices more than a metre inside their tile lie on a drawn road (none hidden under another deck)
   let missing = 0;
@@ -152,7 +154,7 @@ test('every route tile builds roads & ground, and the asphalt covers the whole r
     const x = route.path[i], z = route.path[i + 1];
     const tx = Math.floor(x / 500), tz = Math.floor(z / 500);
     if (Math.min(x - tx * 500, z - tz * 500, (tx + 1) * 500 - x, (tz + 1) * 500 - z) < 1) continue;
-    if (!grids.get(`${tx}_${tz}`)?.covering(x, z, 0.5)) missing++;
+    if (!grids.get(`${tx}_${tz}`)?.some((g) => g.covering(x, z, 0.5))) missing++;
   }
   assert.equal(missing, 0);
 });

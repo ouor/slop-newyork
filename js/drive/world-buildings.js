@@ -52,22 +52,26 @@ function* buildBuildings(tile, ctx) {
     const rng = mulberry32(hashId(b.id, 91));
     const pal = PALETTE[est.style];
     const tint = pal[Math.floor(rng() * pal.length)];
-    const top = est.height;
+    // Phase 2: standing on the lowest ground under the footprint; the walls reach 1 m further down so the terrain
+    // between the sampled corners never shows under them
+    const ground = b.baseY ?? 0;
+    const top = ground + est.height;
     const accent = rng();
+    const sink = est.base > 0 ? 0 : 1;
 
     // Walls (outer ring & courtyards)
     facade.set('tint', ...tint);
-    facade.set('bstyle', est.style, est.floorH, est.seed, top - est.base);
+    facade.set('bstyle', est.style, est.floorH, est.seed, est.height - est.base);
     const onWall = (len) => facade.set('bwall', len, accent);
-    addRingWalls(facade, b.pts, false, est.base, top, onWall);
-    for (const h of b.holes || []) if (h.length >= 6) addRingWalls(facade, h, true, est.base, top, onWall);
+    addRingWalls(facade, b.pts, false, ground + est.base - sink, top, onWall, -sink);
+    for (const h of b.holes || []) if (h.length >= 6) addRingWalls(facade, h, true, ground + est.base - sink, top, onWall, -sink);
 
     // Roof
     roof.set('tint', ...(est.style !== STYLE.apartment && est.style !== STYLE.office && rng() < 0.55 ? ROOF_GREEN : ROOF_GREY));
     addFlatPolygon(roof, b.pts, (b.holes || []).filter((h) => h.length >= 6), top, ctx.triangulate);
 
     rooftop(b, est, top, tint, rng, roof, glow);
-    if (est.style === STYLE.shop) projectingSigns(b, est, rng, glow);
+    if (est.style === STYLE.shop) projectingSigns(b, est, ground, rng, glow);
     count++;
     if (count % 8 === 0) yield;
   }
@@ -144,7 +148,7 @@ function rooftop(b, est, top, tint, rng, roof, glow) {
 }
 
 // 1–2 vertical signs sticking out of the longer walls of a 상가, colour per sign
-function projectingSigns(b, est, rng, glow) {
+function projectingSigns(b, est, ground, rng, glow) {
   const n = b.pts.length >> 1;
   const sign = ringArea(b.pts) >= 0 ? 1 : -1;
   let made = 0;
@@ -162,7 +166,7 @@ function projectingSigns(b, est, rng, glow) {
     const hue = rng();
     const c = [0.5 + 0.5 * Math.cos(hue * 6.283), 0.5 + 0.5 * Math.cos(hue * 6.283 + 2.1), 0.5 + 0.5 * Math.cos(hue * 6.283 + 4.2)];
     glow.set('glow', ...c.map((v) => Math.min(1, v * v + 0.15)), 0);
-    glow.box(x, est.base + 3.2, z, 0.25, h, 0.75, Math.atan2(nx, nz));
+    glow.box(x, ground + est.base + 3.2, z, 0.25, h, 0.75, Math.atan2(nx, nz));
     made++;
   }
 }
