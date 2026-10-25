@@ -117,6 +117,47 @@ centroid (roads: split at tile borders so each piece lives in one tile). Corrido
 - Rain: falling streaks around the camera (instanced, GPU-animated), `cityUniforms.uRoadWetness` ramps, darker
   overcast sky + fog, droplets running on `windshield` with a wiper sweep.
 
+## Phase 2 — terrain and long routes (부산 → 서울)
+
+Elevation comes from **Copernicus GLO-30** (30 m DSM, public on AWS: `https://copernicus-dem-30m.s3.amazonaws.com/
+Copernicus_DSM_COG_10_N{lat}_00_E{lon}_00_DEM/…_DEM.tif`), cached outside the repo (default
+`C:\Users\ouor\Downloads\_\dem-copernicus`, `--dem-cache`). It is a surface model (buildings, forest canopy): in
+built-up areas the pipeline removes building spikes (morphological opening / low percentile filter) before use.
+Attribution: "Copernicus DEM © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018, provided under
+COPERNICUS by the European Union and ESA".
+
+**World y is metres above sea level** (Seoul samples move off y = 0 too). Everything that stood on `y = 0` now
+stands on the terrain or on the road profile.
+
+### Data additions (`route.json` version 2)
+- `pathY`: road-surface elevation at each `path` point. Smoothed along the route (grade ≤ ~6 % on motorways,
+  vertical curves, no DSM noise); on `bridge` segments a straight/convex line between abutments; on `tunnel` segments
+  a straight line between portals (the terrain above stays).
+- `terrain`: `{ "tileN": 65, "far": { "url": "far.bin", "minX", "minZ", "step": 200, "nx", "nz" } }`.
+- Per tile, next to `tiles/<key>.json`: `tiles/<key>.terrain.bin` — little-endian Int16, `tileN × tileN` samples in
+  decimetres, row-major from the tile's `(minX, minZ)` corner, x fastest, spacing `tileSize / (tileN − 1)` (7.8125 m).
+  Heights are already **conformed to the roads**: under every non-tunnel road the ground is set just below the road
+  surface (−0.3 m) across its width plus shoulders, blended into the natural ground with ≈1:2 cut/fill slopes. Under
+  bridges the natural ground is kept.
+- Tile roads gain `ys` (elevation per `pts` point, same rules as `pathY`). Tile buildings gain `baseY` (terrain
+  minimum under the footprint).
+- `far.bin`: little-endian Int16 decimetres, `nx × nz`, coarse ground over the route's bbox + 15 km margin, for
+  distant mountains (not road-conformed).
+
+### Runtime additions
+- `js/drive/terrain-sample.js` (data): `createTileSampler(tile, heightsInt16)` → `{ heightAt(x, z), normalAt(x, z) }`
+  (bilinear); `createFarSampler(far, heightsInt16)` → same API; both pure.
+- `TileStreamer` loads `.terrain.bin` with each tile (`tile.terrain = Int16Array`) and prioritises tiles **ahead along
+  the route** (by route distance from the car, a look-ahead that grows with speed), with more fetches in flight at high
+  speed, so 16×–60× playback on motorways keeps up. `loadRoute` loads `far.bin` (`route.far = { …meta, heights }`).
+- Autopilot: `state.position.y` from `pathY`, `pitch` from grade; motorway cruising ~100–110 km/h.
+- Environment: `setEnclosure(t /* 0 open … 1 inside a tunnel */)` dims sun/sky/environment and leaves tunnel lamps.
+- World: terrain meshes per tile (+ a far-terrain ring around the camera from `route.far`), cut/fill embankments,
+  bridges/viaducts with piers to the ground, tunnel portals and lit tunnel interiors, retaining walls, noise
+  barriers; rural scenery (forests on slopes, 논/밭, 비닐하우스, villages, transmission lines) and highway furniture
+  (guardrails, green 고속도로 signs, gantries, 휴게소/톨게이트 when present in OSM) — split into `world-terrain.js`
+  / `world-structures.js` and `world-rural.js` (`buildRural(tile, ctx)`, called by `world-builder.js`).
+
 ## As implemented (deviations from the contract above)
 - Tiles: areas spanning several tiles are clipped into each corridor tile (not stored once by centroid); rings do
   not repeat their first point; relation-built features use the negative relation id; footways/cycleways/paths/steps
