@@ -1,6 +1,7 @@
 // js/drive/env-sky.js
 // Pure time-of-day / weather maths for the drive environment (no three.js, unit-tested in tests/drive-env.test.cjs):
-// NOAA solar position, sun-elevation keyed blending of the LightingSystem presets, and the overcast / rain grade.
+// NOAA solar position, sun-elevation keyed blending of the LightingSystem presets, the overcast / rain grade and the
+// tunnel enclosure.
 
 const RAD = Math.PI / 180;
 const KST = 9;
@@ -129,6 +130,29 @@ function applyWeather(p, cloud, rain) {
   return p;
 }
 
+// Tunnel lamp colours: newer Korean tunnels have rows of white LEDs, older ones orange (high-pressure) sodium
+const TUNNEL_LAMPS = { led: 0xe6edff, sodium: 0xffa850 };
+const TUNNEL_AMBIENT = 0.55; // hemisphere intensity the lamp rows give the road and the car, deep inside
+const TUNNEL_HAZE = 0x302d29; // exhaust haze
+const TUNNEL_DRY = 0.05; // road wetness under the roof
+
+// Enclosure t (0 open … 1 deep inside a tunnel) on top of the weather grade: sun, sky fill and environment map shut
+// out, the lamps' tinted ambience in their place, a dry road. The sky itself (seen through the portals) is left alone,
+// so the exit glares. Identity at 0 and continuous in t; mutates and returns p.
+function applyEnclosure(p, t, lamp = TUNNEL_LAMPS.led) {
+  t = Math.min(1, Math.max(0, t || 0));
+  if (t === 0) return p;
+  p.sunIntensity *= 1 - 0.95 * t;
+  p.hemiIntensity = p.hemiIntensity * (1 - 0.85 * t) + TUNNEL_AMBIENT * t;
+  p.hemiSky = lerpHex(p.hemiSky, lamp, t);
+  p.hemiGround = lerpHex(p.hemiGround, grey(lamp, 0.5, 0.35), t);
+  p.envIntensity *= 1 - 0.8 * t;
+  p.canyonBounce *= 1 - t;
+  p.fogColor = lerpHex(p.fogColor, TUNNEL_HAZE, t);
+  p.roadWetness += (Math.min(p.roadWetness, TUNNEL_DRY) - p.roadWetness) * t;
+  return p;
+}
+
 // Linear ramp of value toward target at rate (units / s): monotonic, never overshoots
 function stepToward(value, target, rate, dt) {
   const d = target - value;
@@ -136,4 +160,4 @@ function stepToward(value, target, rate, dt) {
   return Math.abs(d) <= step ? target : value + Math.sign(d) * step;
 }
 
-export { solarPosition, sunVector, kstDay, blendTimeParams, applyWeather, stepToward, DAWN };
+export { solarPosition, sunVector, kstDay, blendTimeParams, applyWeather, applyEnclosure, stepToward, DAWN, TUNNEL_LAMPS };

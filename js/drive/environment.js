@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
+import { uniform } from 'three/tsl';
 import { TIME_PRESETS } from '../lighting.js';
-import { solarPosition, sunVector, kstDay, blendTimeParams, applyWeather, stepToward } from './env-sky.js';
+import { solarPosition, sunVector, kstDay, blendTimeParams, applyWeather, applyEnclosure, stepToward, TUNNEL_LAMPS } from './env-sky.js';
 import { createRain } from './weather-rain.js';
 import { createWindshieldMaterial, createWiper } from './weather-windshield.js';
 
@@ -8,6 +9,14 @@ import { createWindshieldMaterial, createWiper } from './weather-windshield.js';
 // Time of day and weather for the drive app (docs/drive.md): the real sun over the route origin in KST, the
 // LightingSystem presets blended continuously by sun elevation, overcast / rain grading, rain streaks around the camera,
 // wet roads and a rainy windshield with wipers. The PMREM environment map is only re-baked when the sky changed enough.
+// Tunnels: setEnclosure(t) (0 open … 1 inside, e.g. the autopilot's tunnelDepth) scales the lights and the environment
+// intensity directly (no re-bake), tints the ambience with the tunnel lamps and stops the rain under the roof.
+
+// Shared with the world builder's tunnel lamps: how enclosed the camera is and the current tunnel's lamp colour
+const tunnelUniforms = {
+  uEnclosure: uniform(0),
+  uLampColor: uniform(new THREE.Color(TUNNEL_LAMPS.led))
+};
 
 const WEATHER = { clear: [0, 0], overcast: [1, 0], rain: [1, 1] }; // [cloud, rain]
 const TRANSITION_RATE = 1 / 6; // weather changes take 6 s
@@ -39,6 +48,8 @@ function createEnvironment({ scene, renderer, lighting, route }) {
     sun: { azimuth: 0, elevation: 0, direction: new THREE.Vector3(0, 1, 0) },
     nightFactor: 0,
     look: 'midday', // nearest post-processing LOOK id, for colorGrade.applyPreset
+    enclosure: 0, // 0 open … 1 inside a tunnel
+    lamp: TUNNEL_LAMPS.led, // current tunnel's lamp colour (hex)
     params: null // the blended lighting values last applied
   };
   let target = WEATHER.clear;
@@ -87,6 +98,7 @@ function createEnvironment({ scene, renderer, lighting, route }) {
     const night = p.nightFactor;
     p.nightFactor = 1 - (1 - night) * (1 - 0.92 * state.cloud);
     lighting.uNightSkyColor.value.copy(NIGHT_SKY).lerp(tmpColor.set(p.fogColor), p.nightFactor > 0 ? (p.nightFactor - night) / p.nightFactor : 0);
+    applyEnclosure(p, state.enclosure, state.lamp);
     state.look = s.elevation < -8 ? 'midnight' : s.elevation < 2 ? 'twilight' : s.elevation < 15 ? 'golden' : 'midday';
     state.params = p;
     return p;
@@ -131,6 +143,18 @@ function createEnvironment({ scene, renderer, lighting, route }) {
     }
   }
 
+  // t: 0 open … 1 inside a tunnel; lamp: 'led' | 'sodium' | hex colour (kept until changed)
+  function setEnclosure(t, lamp) {
+    state.enclosure = Math.min(1, Math.max(0, t || 0));
+    tunnelUniforms.uEnclosure.value = state.enclosure;
+    if (lamp !== undefined) {
+      const hex = typeof lamp === 'string' ? TUNNEL_LAMPS[lamp] : lamp;
+      if (hex === undefined) throw new Error(`Unknown tunnel lamp: ${lamp}`);
+      state.lamp = hex;
+      tunnelUniforms.uLampColor.value.set(hex);
+    }
+  }
+
   function attachWindshield(mesh) {
     const glass = createWindshieldMaterial(mesh);
     mesh.material = glass.material;
@@ -141,17 +165,17 @@ function createEnvironment({ scene, renderer, lighting, route }) {
     return glass.material;
   }
 
-  function updateWindshield(dt, p, speed) {
+  function updateWindshield(dt, p, speed, rainHere) {
     const u = windshield;
     u.time.value = clock;
-    u.rain.value = state.rain;
-    u.fill.value = 14 - 11 * state.rain;
+    u.rain.value = rainHere;
+    u.fill.value = 14 - 11 * rainHere;
     // Drops trickle down at a few cm/s; above ~40 km/h the airflow pushes them up the glass
     const runRate = 0.06 - 0.0005 * speed * speed;
     runFlow += runRate * dt;
     u.runFlow.value = runFlow;
     u.runSign.value = runRate >= 0 ? 1 : -1;
-    wiper.update(clock, state.rain);
+    wiper.update(clock, rainHere);
     tmpColor.set(p.hemiSky).multiplyScalar(p.hemiIntensity * 0.45);
     u.sky.value.copy(tmpColor).lerp(WARM, 0.15 * state.nightFactor);
     u.ambient.value.copy(tmpColor).multiplyScalar(0.5);
@@ -173,15 +197,17 @@ function createEnvironment({ scene, renderer, lighting, route }) {
       .lerp(tmpColor.set(p.fogColor), 0.3)
       .lerp(WARM, 0.25 * state.nightFactor);
     if (camera) camera.getWorldPosition(camPos);
-    rain.update(dt, state.rain, rainColor, camPos, carState);
+    // No rain under a tunnel roof: streaks and fresh drops on the glass fade with the enclosure and return at the exit
+    const rainHere = state.rain * (1 - state.enclosure);
+    rain.update(dt, rainHere, rainColor, camPos, carState);
 
-    if (windshield) updateWindshield(dt, p, (carState && carState.speed) || 0);
+    if (windshield) updateWindshield(dt, p, (carState && carState.speed) || 0, rainHere);
   }
 
   // Lighting ready before the first update (e.g. for a precompile pass); the first update bakes the environment map
   lighting.applyParams(computeParams(), false);
 
-  return { setTime, setDate, setWeather, attachWindshield, update, state };
+  return { setTime, setDate, setWeather, setEnclosure, attachWindshield, update, state };
 }
 
-export { createEnvironment };
+export { createEnvironment, tunnelUniforms };

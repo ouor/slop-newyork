@@ -8,10 +8,14 @@ import { Vector3 } from 'three/webgpu';
 //   acceleration, then swept backwards so the car brakes early enough for every curve and lower limit ahead.
 // - At run time the car accelerates gently up to the profile, brakes to a stop line before a seeded subset of the
 //   traffic signals (waits 10–40 s) and rolls to a stop at the end of the route.
+// - Elevation (route.json v2 `pathY`, optional: y = 0 without it) is resampled with the plan view and rounded into
+//   vertical curves by its own wider smoothing; pitch = atan(grade) plus the spring-damped body pitch. Steep downgrades
+//   and motorway links cap the speed profile too.
 // - `state.distance` is measured along the raw centreline (the same metric as route-data's `cumulative` /
 //   `pointAt`), so callers can stream tiles and jump by distance without knowing about the smoothing.
 // - Extra state beyond the contract: `curvature` (1/m, + = right turn; drives the steering wheel), `accel` (m/s²),
-//   `limit` (current speed limit, m/s), `waiting` (stopped at a signal). `heading` is continuous (unwrapped), so it
+//   `limit` (current speed limit, m/s), `waiting` (stopped at a signal), `grade` (rise / run, + uphill), `tunnel` / `bridge` (the current segment's flags) and
+//   `tunnelDepth` (0 outside and at a portal, rising to 1 TUNNEL_RAMP m inside, for lighting). `heading` is continuous (unwrapped), so it
 //   can exceed ±π on routes that loop; pitch is + nose up, roll is + right side down.
 
 const STEP = 1; // m of raw centreline between samples
@@ -28,6 +32,12 @@ const SIGNAL_CLUSTER = 60; // m: a signal this close after a stop is the same ju
 const SIGNAL_STOP_SHARE = 0.5;
 const PITCH_PER_ACCEL = 0.006; // rad per m/s² (nose dips under braking, squats when pulling away)
 const ROLL_PER_ACCEL = 0.012; // rad per m/s² of lateral acceleration (body leans out of the turn)
+const Y_SMOOTH_RADIUS = 15; // samples: pathY is linear between points ~100 m apart; σ ≈ 15 m rounds the grade breaks
+const SLOPE_RADIUS = 50; // samples: the downgrade speed cap looks at the grade over ~±100 m
+const DOWNGRADE_FREE = 0.03; // no slowing on grades gentler than this
+const DOWNGRADE_SLOWDOWN = 3; // fraction of the limit given up per unit of grade beyond it (-6 % → 91 %)
+const LINK_MAXSPEED = 60; // km/h: ramps and junction links are driven at most this fast
+const TUNNEL_RAMP = 40; // m from a portal to full tunnelDepth
 
 // Small deterministic integer hash -> [0, 1)
 function hash01(n) {
@@ -100,6 +110,8 @@ function bakeRoute(route, lane) {
   const px = new Float64Array(n);
   const pz = new Float64Array(n);
   const offset = new Float64Array(n);
+  const pathY = route.pathY && route.pathY.length === count ? route.pathY : null;
+  const y = new Float64Array(n);
   const segIndex = new Int32Array(n);
   let j = 0;
   for (let i = 0; i < n; i++) {
@@ -109,6 +121,7 @@ function bakeRoute(route, lane) {
     const t = span > 1e-9 ? (s - cumulative[j]) / span : 0;
     px[i] = path[2 * j] + (path[2 * j + 2] - path[2 * j]) * t;
     pz[i] = path[2 * j + 1] + (path[2 * j + 3] - path[2 * j + 1]) * t;
+    if (pathY) y[i] = pathY[j] + (pathY[j + 1] - pathY[j]) * t;
     segIndex[i] = segmentOfPoint[j];
     offset[i] = laneOffset(segments[segIndex[i]], lane);
   }
@@ -156,19 +169,43 @@ function bakeRoute(route, lane) {
     curvature[i] = b > a ? (heading[b] - heading[a]) / ((b - a) * STEP * stretch[i]) : 0;
   }
   boxSmooth(curvature, 2, 1);
+  if (pathY) boxSmooth(y, Y_SMOOTH_RADIUS);
+  const grade = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - 1);
+    const b = Math.min(n - 1, i + 1);
+    grade[i] = b > a ? (y[b] - y[a]) / ((b - a) * STEP * stretch[i]) : 0;
+  }
+  const slope = boxSmooth(Float64Array.from(grade), SLOPE_RADIUS, 2);
+
+  // tunnelDepth: driven metres to the nearer portal of the tunnel run (consecutive tunnel segments), over TUNNEL_RAMP
+  const tunnelDepth = new Float32Array(n);
+  for (let i = 0, run = 0; i < n; i++) {
+    const inside = segments[segIndex[i]].tunnel;
+    tunnelDepth[i] = inside ? run : 0;
+    run = inside ? run + STEP * stretch[i] : 0;
+  }
+  for (let i = n - 1, run = 0; i >= 0; i--) {
+    const inside = segments[segIndex[i]].tunnel;
+    if (inside) tunnelDepth[i] = Math.min(1, Math.min(tunnelDepth[i], run) / TUNNEL_RAMP);
+    run = inside ? run + STEP * stretch[i] : 0;
+  }
 
   // 4. Speed profile: posted limit, curvature cap, then a backward braking sweep
   const limit = new Float64Array(n);
   const profile = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    limit[i] = ((segments[segIndex[i]].maxspeed || 50) / 3.6) * LIMIT_FACTOR;
-    profile[i] = Math.min(limit[i], Math.sqrt(LATERAL_ACCEL / Math.max(Math.abs(curvature[i]), 1e-6)));
+    const seg = segments[segIndex[i]];
+    const kmh = seg.maxspeed || 50;
+    limit[i] = ((/_link$/.test(seg.highway || '') ? Math.min(kmh, LINK_MAXSPEED) : kmh) / 3.6) * LIMIT_FACTOR;
+    const downhill = 1 - DOWNGRADE_SLOWDOWN * Math.max(0, -slope[i] - DOWNGRADE_FREE);
+    profile[i] = Math.min(limit[i] * Math.max(0.7, downhill), Math.sqrt(LATERAL_ACCEL / Math.max(Math.abs(curvature[i]), 1e-6)));
   }
   for (let i = n - 2; i >= 0; i--) {
     profile[i] = Math.min(profile[i], Math.sqrt(profile[i + 1] * profile[i + 1] + 2 * BRAKE * STEP * stretch[i]));
   }
 
-  return { n, length, cumulative, segments, x, z, heading, curvature, stretch, limit, profile, segIndex };
+  return { n, length, cumulative, segments, x, y, z, heading, curvature, grade, tunnelDepth, stretch, limit, profile, segIndex };
 }
 
 // Seeded subset of the signals to stop at: [{ at: stop-line distance, wait: s }], in route order
@@ -189,7 +226,7 @@ function pickSignalStops(route, cumulative, seed) {
 
 function createAutopilot(route, { lane = 'right', startDistance = 0, seed = stringSeed(String(route.id ?? 'route')) } = {}) {
   const baked = bakeRoute(route, lane);
-  const { n, length, x, z, heading, curvature, stretch, limit, profile, segIndex, segments } = baked;
+  const { n, length, x, y, z, heading, curvature, grade, tunnelDepth, stretch, limit, profile, segIndex, segments } = baked;
   const stops = pickSignalStops(route, baked.cumulative, seed);
 
   const state = {
@@ -204,12 +241,17 @@ function createAutopilot(route, { lane = 'right', startDistance = 0, seed = stri
     curvature: 0,
     accel: 0,
     limit: 0,
-    waiting: false
+    waiting: false,
+    grade: 0,
+    tunnel: false,
+    bridge: false,
+    tunnelDepth: 0
   };
 
   let nextStop = 0; // index into stops of the next signal still ahead
   let waitLeft = 0; // s left at the current stop line
   // Pitch & roll follow their targets through a lightly underdamped spring, for a lively but calm camera
+  let bodyPitch = 0; // pitch from braking / pulling away, on top of the road's grade
   let pitchVel = 0;
   let rollVel = 0;
 
@@ -222,11 +264,16 @@ function createAutopilot(route, { lane = 'right', startDistance = 0, seed = stri
 
   function writePose() {
     const s = state.distance;
-    state.position.set(sample(x, s), 0, sample(z, s));
+    state.position.set(sample(x, s), sample(y, s), sample(z, s));
     state.heading = sample(heading, s);
     state.curvature = sample(curvature, s);
+    state.grade = sample(grade, s);
+    state.pitch = Math.atan(state.grade) + bodyPitch;
+    state.tunnelDepth = sample(tunnelDepth, s);
     const i = Math.min(Math.round(s / STEP), n - 1);
     state.segment = segments[segIndex[i]];
+    state.tunnel = !!state.segment.tunnel;
+    state.bridge = !!state.segment.bridge;
     state.limit = limit[i];
   }
 
@@ -273,9 +320,10 @@ function createAutopilot(route, { lane = 'right', startDistance = 0, seed = stri
       const pitchTarget = state.accel * PITCH_PER_ACCEL;
       const rollTarget = -state.speed * state.speed * state.curvature * ROLL_PER_ACCEL;
       const w = 7;
-      pitchVel += ((pitchTarget - state.pitch) * w * w - 2 * 0.55 * w * pitchVel) * h;
+      pitchVel += ((pitchTarget - bodyPitch) * w * w - 2 * 0.55 * w * pitchVel) * h;
       rollVel += ((rollTarget - state.roll) * w * w - 2 * 0.55 * w * rollVel) * h;
-      state.pitch += pitchVel * h;
+      bodyPitch += pitchVel * h;
+      state.pitch = Math.atan(state.grade) + bodyPitch;
       state.roll += rollVel * h;
     }
     return state;
@@ -290,7 +338,7 @@ function createAutopilot(route, { lane = 'right', startDistance = 0, seed = stri
     if (nextStop < 0) nextStop = stops.length;
     // Keep cruising if the profile allows it, so long-route jumps don't start from a standstill
     state.speed = Math.min(state.speed, sample(profile, state.distance));
-    state.pitch = state.roll = pitchVel = rollVel = 0;
+    bodyPitch = state.roll = pitchVel = rollVel = 0;
     writePose();
     return state;
   }
