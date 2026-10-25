@@ -117,6 +117,16 @@ centroid (roads: split at tile borders so each piece lives in one tile). Corrido
 - Rain: falling streaks around the camera (instanced, GPU-animated), `cityUniforms.uRoadWetness` ramps, darker
   overcast sky + fog, droplets running on `windshield` with a wiper sweep.
 
+## As implemented (deviations from the contract above)
+- Tiles: areas spanning several tiles are clipped into each corridor tile (not stored once by centroid); rings do
+  not repeat their first point; relation-built features use the negative relation id; footways/cycleways/paths/steps
+  and `building:part` are not exported. `TileStreamer` sets `tile.key` and keeps `pending` (Set of keys in flight).
+- Autopilot: `state.segment` is the segment object; `state.distance` is along the raw centreline; `heading` is
+  unwrapped; extra fields `curvature`, `accel`, `limit`, `waiting`.
+- Cabin owns `cabin.camera`; look input is CSS pixels (0.004 rad/px).
+- Environment: `state.look` names the colour-grading preset to apply; road wetness follows weather only; the
+  shadow light switches to a moon at night; `lighting.applyParams(p, bake)` and exported `TIME_PRESETS`.
+
 ## Conventions
 - Native ES modules, no build step, no new runtime dependencies. Match the code style of `js/` (comment density,
   naming, TSL usage).
