@@ -2,3 +2,5 @@ osmium>=4.0   # pyosmium: PBF reading + node location index
 numpy>=1.24
 scipy>=1.10   # csgraph.dijkstra for routing
 psutil        # optional: peak memory in the build log
+tifffile      # Copernicus GLO-30 COG tiles (terrain)
+imagecodecs   # DEFLATE + floating-point predictor used by those COGs
