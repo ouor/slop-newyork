@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { readFileSync } = require('node:fs');
+const { existsSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
 
@@ -19,9 +19,11 @@ test('city module preloads start after the import map and before stylesheets', (
   assert.equal(entries.length, 1);
   assert.ok(importMap.index < entries[0].index);
   assert.ok(entries[0].index < stylesheetIndex, 'the module graph starts loading early too');
-  assert.match(html, /<link rel="preconnect" href="https:\/\/cdn\.jsdelivr\.net" crossorigin\s*\/>/);
   const { imports } = JSON.parse(importMap[1]);
   assert.equal(imports.three, imports['three/webgpu'], 'Three.js aliases share one module instance');
+  for (const target of Object.values(imports)) {
+    assert.ok(existsSync(join(__dirname, '..', target)), `vendored Three.js is present: ${target} (node tools/fetch-three.mjs)`);
+  }
 });
 
 test('native module entry and imports share canonical preloaded URLs on GitHub Pages', () => {
