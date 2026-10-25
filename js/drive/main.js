@@ -33,11 +33,13 @@ async function initDrive() {
 
   const scene = new THREE.Scene();
   const lighting = new LightingSystem(scene, renderer);
+  lighting.sky.scale.setScalar(1e6); // the sky box is centred on the origin: big enough for a 400 km route
   const world = createWorldBuilder(scene, { route });
   const autopilot = createAutopilot(route, { lane: 'right' });
   const cabin = createCarCabin(scene, {});
   const camera = cabin.camera;
   camera.aspect = window.innerWidth / window.innerHeight;
+  camera.far = 40000; // the far terrain reaches ~26 km (world-far.js)
   camera.updateProjectionMatrix();
   const environment = createEnvironment({ scene, renderer, lighting, route });
   environment.attachWindshield(cabin.windshield);
@@ -172,6 +174,7 @@ async function initDrive() {
   let fpsTimer = 0;
   let hudTimer = 0;
   let gradeLook = null;
+  const shadowFocus = new THREE.Vector3();
   renderer.setAnimationLoop((now) => {
     const dt = Math.min(Math.max((now - lastTime) * 0.001, 0.001), 0.05);
     lastTime = now;
@@ -186,7 +189,8 @@ async function initDrive() {
     environment.setEnclosure(state.tunnelDepth ?? 0);
     environment.update(dt, camera, state);
     if (environment.state.look !== gradeLook) colorGrade.applyPreset((gradeLook = environment.state.look));
-    lighting.update(camera.position);
+    // Shadow range by height above the road (world y is metres above sea level)
+    lighting.update(shadowFocus.set(0, camera.getWorldPosition(shadowFocus).y - state.position.y, 0));
     renderPipeline.render();
 
     fpsFrames++;
