@@ -269,17 +269,23 @@ class LightingSystem {
       return;
     }
     this.activePresetId = p.id;
+    this.applyParams(p);
+  }
 
-    this.sunLight.color.setHex(p.sunColor);
+  // Sets every lighting value from a preset-shaped object (colours as hex or THREE.Color). The drive app blends presets
+  // continuously and re-bakes the environment map itself (bake = false), throttled; skySunDir (optional) lets the sky
+  // follow the real sun below the horizon while the shadow-casting light stays up as the moon.
+  applyParams(p, bake = true) {
+    this.sunLight.color.set(p.sunColor);
     this.sunLight.intensity = p.sunIntensity;
     this.sunLight.position.copy(p.sunDir);
     this.sunLight.updateMatrixWorld();
 
-    this.hemiLight.color.setHex(p.hemiSky);
-    this.hemiLight.groundColor.setHex(p.hemiGround);
+    this.hemiLight.color.set(p.hemiSky);
+    this.hemiLight.groundColor.set(p.hemiGround);
     this.hemiLight.intensity = p.hemiIntensity;
 
-    this.scene.fog.color.setHex(p.fogColor);
+    this.scene.fog.color.set(p.fogColor);
     this.scene.fog.density = p.fogDensity;
     if (this.uFogDensity) this.uFogDensity.value = p.fogDensity;
 
@@ -290,13 +296,13 @@ class LightingSystem {
     this.sky.mieDirectionalG.value = p.mieDirectionalG;
     this.sky.cloudCoverage.value = p.cloudCoverage;
     this.sky.cloudDensity.value = p.cloudDensity;
-    this.sky.sunPosition.value.copy(p.sunDir);
+    this.sky.sunPosition.value.copy(p.skySunDir || p.sunDir);
     this.uSkyExposure.value = p.skyExposure;
     this.uNightFactor.value = p.nightFactor;
 
-    cityUniforms.uSunColor.value.setHex(p.sunColor);
-    cityUniforms.uSkyTopColor.value.setHex(p.skyTop);
-    cityUniforms.uSkyHorizonColor.value.setHex(p.skyHorizon);
+    cityUniforms.uSunColor.value.set(p.sunColor);
+    cityUniforms.uSkyTopColor.value.set(p.skyTop);
+    cityUniforms.uSkyHorizonColor.value.set(p.skyHorizon);
     cityUniforms.uSkySunDir.value.copy(p.sunDir);
     cityUniforms.uInteriorGlow.value = p.interiorGlow;
     cityUniforms.uRoadWetness.value = p.roadWetness;
@@ -305,7 +311,7 @@ class LightingSystem {
     }
 
     this.scene.environmentIntensity = p.envIntensity;
-    this.bakeEnvironmentMap();
+    if (bake) this.bakeEnvironmentMap();
   }
 
   update(focusPos) {
@@ -318,4 +324,4 @@ class LightingSystem {
   }
 }
 
-export { LightingSystem };
+export { LightingSystem, TIME_PRESETS };
