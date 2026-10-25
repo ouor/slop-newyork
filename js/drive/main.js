@@ -112,7 +112,13 @@ async function initDrive() {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   status('Compiling shaders…');
+  // Into the scene pass's target with its MRT (as js/main.js does): the pipelines the frames use, and materials that
+  // write only some MRT outputs (lane paint) don't fail against the canvas
+  renderer.setRenderTarget(scenePass.renderTarget);
+  renderer.setMRT(sceneMRT);
   await renderer.compileAsync(scene, camera);
+  renderer.setMRT(null);
+  renderer.setRenderTarget(null);
 
   // UI
   let timeScale = 1;
