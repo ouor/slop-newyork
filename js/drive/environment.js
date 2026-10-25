@@ -177,9 +177,11 @@ function createEnvironment({ scene, renderer, lighting, route }) {
     u.runSign.value = runRate >= 0 ? 1 : -1;
     wiper.update(clock, rainHere);
     tmpColor.set(p.hemiSky).multiplyScalar(p.hemiIntensity * 0.45);
-    u.sky.value.copy(tmpColor).lerp(WARM, 0.15 * state.nightFactor);
+    // At night the warm street-light share dims too: on unlit roads drops must not glow over the view ahead
+    u.sky.value.copy(tmpColor).lerp(WARM, 0.15 * state.nightFactor).multiplyScalar(1 - 0.8 * state.nightFactor);
     u.ambient.value.copy(tmpColor).multiplyScalar(0.5);
-    u.glint.value.set(p.sunColor).multiplyScalar(Math.min(1, p.sunIntensity / 5) + 0.15).lerp(WARM, 0.6 * state.nightFactor);
+    u.glint.value.set(p.sunColor).multiplyScalar(Math.min(1, p.sunIntensity / 5) + 0.15).lerp(WARM, 0.6 * state.nightFactor)
+      .multiplyScalar(1 - 0.7 * state.nightFactor);
   }
 
   function update(dt, camera, carState) {
@@ -192,14 +194,18 @@ function createEnvironment({ scene, renderer, lighting, route }) {
     lighting.applyParams(p, false);
     maybeBake(p, dt);
 
-    // Streaks lit by the sky (and, at night, a share of sodium street lighting), greyed into the fog
+    // Streaks lit by the sky (and, at night, a faint share of sodium street lighting), greyed into the fog. At night
+    // rain is mostly seen where the car's own headlights catch it (weather-rain.js), so the ambient share stays dim.
     rainColor.set(p.hemiSky).multiplyScalar(p.hemiIntensity * 0.9)
       .lerp(tmpColor.set(p.fogColor), 0.3)
-      .lerp(WARM, 0.25 * state.nightFactor);
+      .lerp(WARM, 0.25 * state.nightFactor)
+      .multiplyScalar(1 - 0.75 * state.nightFactor);
+    // Same dusk ramp as the car's headlights (car-cabin.js)
+    const beams = Math.min(1, Math.max(0, (p.interiorGlow - 0.6) * 1.45));
     if (camera) camera.getWorldPosition(camPos);
     // No rain under a tunnel roof: streaks and fresh drops on the glass fade with the enclosure and return at the exit
     const rainHere = state.rain * (1 - state.enclosure);
-    rain.update(dt, rainHere, rainColor, camPos, carState);
+    rain.update(dt, rainHere, rainColor, camPos, carState, beams);
 
     if (windshield) updateWindshield(dt, p, (carState && carState.speed) || 0, rainHere);
   }

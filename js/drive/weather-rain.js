@@ -37,6 +37,7 @@ function createRain() {
   const uColor = uniform(new THREE.Color(0x8890a0));
   const uCarPos = uniform(new THREE.Vector3(0, -1e5, 0));
   const uCarAxes = uniform(new THREE.Vector4(0, -1, 1, 0)); // forward.xz, right.xz
+  const uBeam = uniform(new THREE.Color(0x000000)); // headlight colour × on-ness (0 by day)
 
   const seeds = new Float32Array(DROPS * 4 * 3);
   const corners = new Float32Array(DROPS * 4 * 2);
@@ -65,6 +66,17 @@ function createRain() {
   const edge = max(max(abs(local.x).div(BOX.x), abs(local.z).div(BOX.z)), abs(local.y).div(BOX.y));
   const vFade = varying(float(1).sub(smoothstep(0.36, 0.5, edge)).mul(float(1).sub(corner.y.mul(0.8))), 'vRainFade');
 
+  // Drops inside the headlight cones glint: in front of the car, within the wide beam's spread, below its top edge,
+  // falling off with distance like the lamps (car-cabin.js BEAMS)
+  const rel = head.sub(uCarPos);
+  const along = dot(rel.xz, uCarAxes.xy);
+  const across = dot(rel.xz, uCarAxes.zw);
+  const spread = float(0.9).add(along.mul(0.5));
+  const inBeam = smoothstep(1.5, 3.0, along)
+    .mul(float(1).sub(smoothstep(spread.mul(0.6), spread, abs(across))))
+    .mul(float(1).sub(smoothstep(along.mul(0.08).add(0.8), along.mul(0.08).add(1.6), rel.y)));
+  const vBeam = varying(inBeam.div(along.div(14).pow(2).add(1)), 'vRainBeam');
+
   const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
   material.fog = false;
   material.positionNode = Fn(() => {
@@ -78,14 +90,11 @@ function createRain() {
     const pos = head.sub(dir.mul(streak.mul(corner.y))).add(side.mul(width.mul(corner.x)));
 
     // Hidden drops collapse to a point: beyond the rain amount, too close to the lens, or inside the car body
-    const rel = head.sub(uCarPos);
-    const along = dot(rel.xz, uCarAxes.xy);
-    const across = dot(rel.xz, uCarAxes.zw);
     const inCar = abs(along).lessThan(2.6).and(abs(across).lessThan(1.05)).and(rel.y.lessThan(1.75));
     const hidden = fract(seed.z.mul(71.3)).greaterThan(uAmount).or(dist.lessThan(0.5)).or(inCar);
     return select(hidden, head, pos);
   })();
-  material.colorNode = uColor;
+  material.colorNode = uColor.add(uBeam.mul(vBeam));
   material.opacityNode = vFade.mul(float(1).sub(abs(corner.x))).mul(0.5);
 
   const mesh = new THREE.Mesh(geometry, material);
@@ -97,12 +106,14 @@ function createRain() {
 
   const fall = new THREE.Vector3();
 
-  // amount 0..1, colour (THREE.Color), camera position, car state ({ position, heading, speed }) or null
-  function update(dt, amount, color, camPos, car) {
+  // amount 0..1, colour (THREE.Color), camera position, car state ({ position, heading, speed }) or null,
+  // beams 0..1 (headlights on)
+  function update(dt, amount, color, camPos, car, beams = 0) {
     mesh.visible = amount > 0.001;
     if (!mesh.visible) return;
     uAmount.value = amount;
     uColor.value.copy(color);
+    uBeam.value.setRGB(1.0, 0.97, 0.9).multiplyScalar(1.6 * beams);
     uCam.value.copy(camPos);
     const wind = 1.2 * amount; // a little drift in heavy rain
     fall.set(wind * 0.6, -FALL_SPEED, wind * 0.4);

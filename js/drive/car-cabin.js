@@ -10,7 +10,7 @@ import {
   buildSteerableWheelGeo,
   createLoftedCarMaterial
 } from '../actor-models.js';
-import { HEADLIGHTS, createVehicleHeadlight, placeVehicleHeadlight } from '../vehicle-lights.js';
+import { createVehicleHeadlight, placeVehicleHeadlight } from '../vehicle-lights.js';
 
 // js/drive/car-cabin.js
 // The Korea Drive player car seen from inside: the lofted sedan exterior from actor-models.js (white, no taxi sign)
@@ -35,6 +35,12 @@ const LOOK_PER_PX = 0.004; // rad per CSS pixel
 const LOOK_IDLE = 1.2; // s before the look eases back
 const CLUSTER_W = 0.34;
 const CLUSTER_H = 0.13;
+// Per lamp: wide near spread (top edge ~4° above the horizon, lights verges and signs) + narrow far reach. Intensities
+// in cd for inverse-square decay: ≈ 4 at 60 m and ≈ 1 at 120 m on the road ahead (dark asphalt needs it).
+const BEAMS = [
+  { angle: 0.5, penumbra: 0.7, pitch: 0.43, distance: 45, intensity: 2400 },
+  { angle: 0.13, penumbra: 0.6, pitch: 0.012, distance: 140, intensity: 14000 }
+];
 
 const _up = new THREE.Vector3(0, 1, 0);
 const _zAxis = new THREE.Vector3(0, 0, 1);
@@ -217,12 +223,23 @@ function createCarCabin(scene, { spec = 'sedan' } = {}) {
     chassis.add(plate);
   }
 
+  // Manhattan's low beam (±8°, 36 m) assumes lit streets; on an unlit motorway a lamp needs both a wide, short
+  // spread over the near road and verges and a narrow beam that reaches ~100 m. A round cone can't be both, so
+  // each lamp is a pair of spots (same position, different cone, pitch and reach).
   const headLights = [];
   for (const side of [-1, 1]) {
-    const spot = createVehicleHeadlight();
-    placeVehicleHeadlight(spot, spec, side);
-    chassis.add(spot, spot.target);
-    headLights.push(spot);
+    for (const beam of BEAMS) {
+      const spot = createVehicleHeadlight();
+      placeVehicleHeadlight(spot, spec, side);
+      spot.angle = beam.angle;
+      spot.penumbra = beam.penumbra;
+      spot.distance = beam.distance;
+      const t = spot.target.position;
+      t.y = spot.position.y - (t.z - spot.position.z) * Math.tan(beam.pitch);
+      spot.userData.intensity = beam.intensity;
+      chassis.add(spot, spot.target);
+      headLights.push(spot);
+    }
   }
 
   // --- Interior ---------------------------------------------------------------------------------------------------
@@ -504,7 +521,7 @@ function createCarCabin(scene, { spec = 'sedan' } = {}) {
     // Headlights fade in at dusk exactly like the Manhattan player car, and are switched on in tunnels (as the law asks)
     const glow = cityUniforms.uInteriorGlow.value;
     const beamScale = Math.max(inTunnel ? 1 : 0, Math.min(1.28, Math.max(0, (glow - 0.6) * 1.45)));
-    for (const spot of headLights) spot.intensity = HEADLIGHTS.intensity * beamScale;
+    for (const spot of headLights) spot.intensity = spot.userData.intensity * beamScale;
 
     // Look around: drag offsets, clamped per view, easing back to centre when idle
     const dx = input.lookDX || 0;
