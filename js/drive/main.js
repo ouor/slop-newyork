@@ -183,6 +183,7 @@ async function initDrive() {
     look.dy = 0;
     streamer.update(state.position.x, state.position.z);
     world.update(camera);
+    environment.setEnclosure(state.tunnelDepth ?? 0);
     environment.update(dt, camera, state);
     if (environment.state.look !== gradeLook) colorGrade.applyPreset((gradeLook = environment.state.look));
     lighting.update(camera.position);

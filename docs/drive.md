@@ -168,6 +168,10 @@ stands on the terrain or on the road profile.
 - Environment: `state.look` names the colour-grading preset to apply; road wetness follows weather only; the
   shadow light switches to a moon at night; `lighting.applyParams(p, bake)` and exported `TIME_PRESETS`.
 
+- Phase 2 autopilot: `state.grade`, `state.tunnel`, `state.bridge`, `state.tunnelDepth` (0 at a portal → 1 over
+  40 m); `y` from `pathY` (≈15 m extra smoothing). Environment: `setEnclosure(t, lamp = 'led' | 'sodium' | hex)`,
+  exported `tunnelUniforms = { uEnclosure, uLampColor }` for tunnel lamps.
+
 ## Conventions
 - Native ES modules, no build step, no new runtime dependencies. Match the code style of `js/` (comment density,
   naming, TSL usage).
