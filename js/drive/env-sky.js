@@ -126,7 +126,6 @@ function applyWeather(p, cloud, rain) {
   p.envIntensity *= 1 - 0.15 * c;
   p.canyonBounce *= 1 - 0.6 * c;
   p.interiorGlow += 0.35 * c * (1 - p.nightFactor);
-  p.nightFactor = Math.min(1, p.nightFactor + 0.12 * rain);
   return p;
 }
 
