@@ -167,6 +167,28 @@ stands on the terrain or on the road profile.
 - Cabin owns `cabin.camera`; look input is CSS pixels (0.004 rad/px).
 - Environment: `state.look` names the colour-grading preset to apply; road wetness follows weather only; the
   shadow light switches to a moon at night; `lighting.applyParams(p, bake)` and exported `TIME_PRESETS`.
+- Terrain data (`tools/drive/terrain.py`):
+  - `path` and tile road `pts` are densified so no edge exceeds 25 m (the vertical profile needs points between
+    far-apart OSM nodes); `segments` / `signals` index the densified path. `pathY` / `ys` are rounded to 0.01 m.
+  - Ground = the DSM after a grey opening of 5 px (~150 m) everywhere, blended towards a 9 px (~270 m) opening where
+    the corridor is built up (building cover on a 125 m grid, landuse residential/commercial/industrial/retail).
+    Forest canopy stays. `far.bin` is the raw DSM block-averaged 6 × 6 (~180 m), sea (missing tiles) = 0.
+  - Road heights are one sparse least-squares solve over every corridor road (route included) on shared nodes:
+    ground data term, membrane smoothing per class (motorway 150 m … minor 30 m), no data on bridges / tunnels
+    (straight between abutments / portals), soft grade limits by reweighting (motorway 6 %, trunk 7 %, links 8 %,
+    primary 10 %, others 15 %). Bridges rise to ≥ min(6 m, length / 15) over the ground (overpasses); tunnels dip to
+    ≥ min(7 m, length / 15) under it (urban underpasses). `pathY` = the solved heights of the route's nodes, so
+    roads meet the route at the same height.
+  - Conforming: flat ground at road −0.3 m over `width / 2` + 2 m shoulder + 2 m (so the 7.8 m grid can't poke
+    through a road edge), 1:2 slopes beyond; the route and higher classes win where slopes overlap. Bridges trim
+    the natural ground only where it comes within 1.5 m of the deck; no cut beyond a road end at a tunnel portal.
+  - `route.json` `terrain` also has `attribution`. Building `baseY` = the minimum of the conformed grid at the
+    footprint's vertices and centroid (sampled in the building's own tile, clamped).
+- `TileStreamer.update(x, z, { distance, speed })`: `distance` = car's route distance, `speed` = world metres per
+  real second (car speed × playback time scale). Look-ahead along the route = `radius` + 6 s × speed, in flight
+  2 + speed / 150 (max 8) tiles; a tile's route distance is the middle of the stretch where the path passes within
+  400 m of it (`tile.along`). Without the options it streams nearest-first as before. Version 1 routes (no
+  `terrain`) still load without `.terrain.bin`.
 
 ## Conventions
 - Native ES modules, no build step, no new runtime dependencies. Match the code style of `js/` (comment density,
