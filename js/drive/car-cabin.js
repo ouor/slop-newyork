@@ -470,6 +470,7 @@ function createCarCabin(scene, { spec = 'sedan' } = {}) {
   let wheelSpin = 0;
   let lastDistance = null;
   let speed = 0;
+  let inTunnel = false;
 
   function setPose(state) {
     group.position.copy(state.position);
@@ -477,6 +478,7 @@ function createCarCabin(scene, { spec = 'sedan' } = {}) {
     chassis.rotation.set(-(state.pitch || 0), 0, state.roll || 0);
     steerTarget = Math.atan(2 * spec.wheelZ * (state.curvature || 0));
     speed = state.speed;
+    inTunnel = !!state.tunnel;
     if (lastDistance !== null) {
       const step = (state.distance - lastDistance) / spec.wheelRadius;
       wheelSpin = (wheelSpin + Math.sign(step) * Math.min(Math.abs(step), 0.48)) % (Math.PI * 2);
@@ -499,9 +501,9 @@ function createCarCabin(scene, { spec = 'sedan' } = {}) {
       if (w.isFront) w.steerPivot.rotation.y = -steer;
     }
 
-    // Headlights fade in at dusk exactly like the Manhattan player car
+    // Headlights fade in at dusk exactly like the Manhattan player car, and are switched on in tunnels (as the law asks)
     const glow = cityUniforms.uInteriorGlow.value;
-    const beamScale = Math.min(1.28, Math.max(0, (glow - 0.6) * 1.45));
+    const beamScale = Math.max(inTunnel ? 1 : 0, Math.min(1.28, Math.max(0, (glow - 0.6) * 1.45)));
     for (const spot of headLights) spot.intensity = HEADLIGHTS.intensity * beamScale;
 
     // Look around: drag offsets, clamped per view, easing back to centre when idle
