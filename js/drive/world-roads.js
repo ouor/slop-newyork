@@ -2,17 +2,19 @@ import { MeshData, SegmentGrid, resamplePolyline, walkPolyline } from './world-g
 
 // js/drive/world-roads.js
 // Road network of one tile, as plain mesh data (world-builder.js turns it into meshes):
-// - asphalt ribbons with miter joins and round end caps, all at one height: crossing roads share the world-space
-//   asphalt shader, so where they overlap the z-fight is between identical pixels and never shows
+// - asphalt ribbons with miter joins and round end caps on the road profile (`ys`, phase 2; y = 0 without), with a
+//   short skirt down their edges onto the conformed ground: crossing roads share the world-space asphalt shader, so where
+//   they overlap the z-fight is between identical pixels and never shows
 // - Korean markings: double yellow centre lines on two-way roads, dashed white lane lines, a yellow median line on
 //   divided roads, blue bus lanes, zebra crosswalks and stop lines at intersections; paint is dropped wherever it would
 //   lie on another road's carriageway, so intersections stay clean
 // - raised sidewalks + granite curbs along streets, cut away where another carriageway crosses them; concrete medians
-//   with the white & yellow anti-jaywalking fence on divided roads, steel guardrails along the expressways
-// - bridges (반포대교…) as decks at road level with parapets and piers down into the river; roads hidden under a
-//   higher deck (잠수교 under 반포대교) and tunnels off the route are left out
+//   with the white & yellow anti-jaywalking fence on divided roads
+// - roads hidden under a higher deck (잠수교 under 반포대교) are left out; bridge and tunnel structures, expressway
+//   guardrails and barriers are world-structures.js's (from the `bridges` / `tunnels` lists returned here)
+// Roads only see roads on their own level (ground, bridge deck or tunnel) when dropping paint and sidewalks.
 // It also returns where the street furniture goes: sidewalk lines for trees & lamps, signal approaches, small streets
-// for utility poles.
+// for utility poles (with the y they stand at).
 
 const ROAD_Y = 0.01;
 const PAINT_Y = 0.006; // above the asphalt
@@ -24,6 +26,7 @@ const BLUE = [0.16, 0.42, 0.85];
 const STREET = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street',
   'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link']);
 const MAJOR = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary']);
+const EXPRESS = new Set(['motorway', 'motorway_link', 'trunk', 'trunk_link']);
 const MARKED = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified']);
 // Sidewalk width by class (residential streets only when they are wide)
 const SIDEWALK = { primary: 4.5, secondary: 3.5, tertiary: 2.8, unclassified: 2.0, primary_link: 2.5, secondary_link: 2.5, tertiary_link: 2.0 };
@@ -46,22 +49,26 @@ const inRun = (ok, i) => ok[i] && (ok[i - 1] || ok[i + 1]);
 // Offset point of a resampled polyline sample (miter-scaled)
 const off = (p, o) => [p.x + p.rx * o * p.miter, p.z + p.rz * o * p.miter];
 
-// Flat ribbon between offsets o0 < o1 at height y over the runs of samples where ok(i) holds
-function ribbon(mesh, S, o0, o1, y, ok = null) {
+// Ribbon between offsets o0 < o1 at height y above the samples' road profile (level across the road) over the runs of
+// samples where ok(i) holds, facing up (face = 1) or down (-1, soffits)
+function ribbon(mesh, S, o0, o1, y, ok = null, face = 1) {
   for (let i = 0; i + 1 < S.length; i++) {
     if (ok && !(ok[i] && ok[i + 1])) continue;
     const a0 = off(S[i], o0), a1 = off(S[i], o1), b0 = off(S[i + 1], o0), b1 = off(S[i + 1], o1);
-    mesh.quad([[a0[0], y, a0[1]], [a1[0], y, a1[1]], [b1[0], y, b1[1]], [b0[0], y, b0[1]]], 0, 1, 0);
+    const ya = S[i].y + y, yb = S[i + 1].y + y;
+    mesh.quad([[a0[0], ya, a0[1]], [a1[0], ya, a1[1]], [b1[0], yb, b1[1]], [b0[0], yb, b0[1]]], 0, face, 0);
   }
 }
 
-// Vertical wall along offset o from y0 to y1, facing to the right of the road (face = 1) or to its left (-1)
+// Vertical wall along offset o from y0 to y1 above the road profile, facing to the right of the road (face = 1) or to
+// its left (-1)
 function wall(mesh, S, o, y0, y1, face, ok = null) {
   for (let i = 0; i + 1 < S.length; i++) {
     if (ok && !(ok[i] && ok[i + 1])) continue;
     const a = off(S[i], o), b = off(S[i + 1], o);
+    const ya = S[i].y, yb = S[i + 1].y;
     const nx = (S[i].rx + S[i + 1].rx) * 0.5 * face, nz = (S[i].rz + S[i + 1].rz) * 0.5 * face;
-    mesh.quad([[a[0], y0, a[1]], [b[0], y0, b[1]], [b[0], y1, b[1]], [a[0], y1, a[1]]], nx, 0, nz);
+    mesh.quad([[a[0], ya + y0, a[1]], [b[0], yb + y0, b[1]], [b[0], yb + y1, b[1]], [a[0], ya + y1, a[1]]], nx, 0, nz);
   }
 }
 
@@ -95,12 +102,11 @@ function* buildRoads(tile, routeGrid) {
   for (const src of tile.roads || []) {
     if (!src.pts || src.pts.length < 4) continue;
     if (src.highway === 'pedestrian' && (src.bridge || src.layer > 0)) continue; // 서울로 7017 skywalk etc.
-    const S = resamplePolyline(src.pts, 4);
+    const S = resamplePolyline(src.pts, 4, src.ys);
     if (S.length < 2) continue;
     let onRoute = 0;
     for (const p of S) if (routeGrid.covering(p.x, p.z, 0)) onRoute++;
     const route = onRoute >= S.length * 0.6;
-    if (src.tunnel && !route) continue;
     const half = Math.max(1.5, (src.width || 3.3 * (src.lanes || 1)) * 0.5);
     roads.push({ src, S, half, route, hw: src.highway, minor: !STREET.has(src.highway) || src.highway === 'busway', layer: src.layer || 0 });
   }
@@ -114,8 +120,10 @@ function* buildRoads(tile, routeGrid) {
     r.hidden = under >= r.S.length * 0.5;
   }
   const visible = roads.filter((r) => !r.hidden);
+  // Carriageways on the surface & decks, and in tunnels (under the streets, they must not cut the paint up there)
   const grid = new SegmentGrid(20);
-  visible.forEach((r, k) => { r.index = k; grid.add(r.src.pts, r.half, k); });
+  const tunnelGrid = new SegmentGrid(20);
+  visible.forEach((r, k) => { r.index = k; (r.src.tunnel ? tunnelGrid : grid).add(r.src.pts, r.half, k); });
   yield;
 
   // 2. Intersections: vertices shared by two or more streets
@@ -134,46 +142,33 @@ function* buildRoads(tile, routeGrid) {
   const signalSites = [];
   const smallStreets = [];
   const bridges = [];
-  const coveredByOther = (r, x, z, margin = 0) => grid.covering(x, z, margin, (k) => k === r.index || visible[k].minor);
+  const tunnels = [];
+  const coveredByOther = (r, x, z, margin = 0) => (r.src.tunnel ? tunnelGrid : grid)
+    .covering(x, z, margin, (k) => k === r.index || visible[k].minor || !visible[k].src.bridge !== !r.src.bridge);
 
   for (const r of visible) {
     const { src, S, half } = r;
     const m = meshes;
 
-    // Asphalt
+    // Asphalt, with a skirt down to the conformed ground (0.3 m below) along its edges, left out at junctions
     ribbon(m.road, S, -half, half, ROAD_Y);
     const n = src.pts.length >> 1;
     for (const i of [0, n - 1]) {
       const x = src.pts[i * 2], z = src.pts[i * 2 + 1];
-      if (!onBorder(x, z)) cap(m.road, x, z, half, ROAD_Y);
+      if (!onBorder(x, z)) cap(m.road, x, z, half, ROAD_Y + (src.ys ? src.ys[i] : 0));
+    }
+    if (!src.bridge && !src.tunnel) {
+      for (const side of [-1, 1]) {
+        const ok = S.map((p) => { const a = off(p, side * (half + 0.6)); return !coveredByOther(r, a[0], a[1]); });
+        wall(m.road, S, side * half, -0.7, ROAD_Y - 0.02, side, ok);
+      }
     }
 
-    // Bridges: deck edges, soffit, parapets and piers
     if (src.bridge) {
-      m.concrete.set('tint', 0.62, 0.61, 0.58);
-      wall(m.concrete, S, -half, -1.6, ROAD_Y, -1);
-      wall(m.concrete, S, half, -1.6, ROAD_Y, 1);
-      ribbon(m.concrete, S, -half, half, -1.6);
-      // Low concrete kerb with a steel railing on posts, left out where the next carriageway of the deck runs alongside
-      const R = resamplePolyline(src.pts, 2.5);
-      for (const side of [-1, 1]) {
-        const ok = R.map((p) => { const a = off(p, side * (half + 1.5)); return !coveredByOther(r, a[0], a[1]); });
-        const o = side * (half + 0.2);
-        m.concrete.set('tint', 0.6, 0.6, 0.58);
-        block(m.concrete, R, o - 0.2, o + 0.2, -0.2, 0.4, ok);
-        m.prop.set('tint', 0.42, 0.47, 0.52);
-        block(m.prop, R, o - 0.05, o + 0.05, 1.0, 1.1, ok);
-        block(m.prop, R, o - 0.02, o + 0.02, 0.7, 0.74, ok);
-        R.forEach((p, i) => { if (inRun(ok, i)) { const [x, z] = off(p, o); m.prop.box(x, 0.4, z, 0.07, 0.62, 0.07); } });
-      }
-      const P = resamplePolyline(src.pts, 45);
-      for (let i = 1; i < P.length - 1; i++) {
-        m.concrete.set('tint', 0.55, 0.54, 0.51);
-        m.concrete.box(P[i].x, -16, P[i].z, half * 1.3, 14.4, 2.6, Math.atan2(-P[i].rz, P[i].rx));
-      }
       bridges.push(r);
-      for (const p of resamplePolyline(src.pts, 30)) lampSites.push({ x: p.x + p.rx * (half + 0.2), z: p.z + p.rz * (half + 0.2), ax: -p.rx, az: -p.rz, y: 0.95, bridge: true });
+      for (const p of resamplePolyline(src.pts, 30, src.ys)) lampSites.push({ x: p.x + p.rx * (half + 0.3), y: p.y + 1.0, z: p.z + p.rz * (half + 0.3), ax: -p.rx, az: -p.rz, bridge: true });
     }
+    if (src.tunnel) tunnels.push(r);
 
     // Markings
     if (MARKED.has(r.hw) || r.hw === 'busway' || (r.hw === 'residential' && half >= 5)) paintRoad(m.paint, r, S, coveredByOther);
@@ -182,7 +177,7 @@ function* buildRoads(tile, routeGrid) {
     const sw = SIDEWALK[r.hw] ?? (r.hw === 'residential' && half >= 5 ? 2.2 : 0);
     const divided = src.oneway && (r.hw === 'primary' || r.hw === 'secondary' || r.hw === 'trunk') && src.lanes >= 2;
     if (!src.bridge && !src.tunnel && sw > 0) {
-      const W = resamplePolyline(src.pts, 3);
+      const W = resamplePolyline(src.pts, 3, src.ys);
       for (const side of divided ? [1] : [1, -1]) {
         const ok = W.map((p) => {
           const a = off(p, side * (half + 0.4)), b = off(p, side * (half + sw - 0.3));
@@ -191,17 +186,18 @@ function* buildRoads(tile, routeGrid) {
         const o0 = side > 0 ? half : -half - sw, o1 = side > 0 ? half + sw : -half;
         ribbon(m.sidewalk, W, o0, o1, CURB_H, ok);
         wall(m.curb, W, side * half, 0, CURB_H, -side, ok);
+        wall(m.curb, W, side > 0 ? o1 : o0, -1.2, CURB_H, side, ok); // its back, down onto the ground beyond
         ribbon(m.curb, W, side > 0 ? half : -half - 0.18, side > 0 ? half + 0.18 : -half, CURB_H + 0.002, ok);
         W.forEach((p, i) => {
           if (!ok[i]) return;
-          walkSites.push({ x: p.x + p.rx * side * (half + sw - 1.0), z: p.z + p.rz * side * (half + sw - 1.0), s: p.s, road: r, side, sw, dx: p.dx, dz: p.dz, rx: p.rx * side, rz: p.rz * side });
-          lampSites.push({ x: p.x + p.rx * side * (half + 0.5), z: p.z + p.rz * side * (half + 0.5), ax: -p.rx * side, az: -p.rz * side, s: p.s, road: r, side });
+          walkSites.push({ x: p.x + p.rx * side * (half + sw - 1.0), y: p.y + CURB_H, z: p.z + p.rz * side * (half + sw - 1.0), s: p.s, road: r, side, sw, dx: p.dx, dz: p.dz, rx: p.rx * side, rz: p.rz * side });
+          lampSites.push({ x: p.x + p.rx * side * (half + 0.5), y: p.y + CURB_H, z: p.z + p.rz * side * (half + 0.5), ax: -p.rx * side, az: -p.rz * side, s: p.s, road: r, side });
         });
       }
     }
     if (divided && !src.bridge) {
       // Median kerb with the white / yellow fence on the left of a divided road
-      const W = resamplePolyline(src.pts, 2);
+      const W = resamplePolyline(src.pts, 2, src.ys);
       const ok = W.map((p) => { const a = off(p, -half - 0.3); return !coveredByOther(r, a[0], a[1], -0.2); });
       m.concrete.set('tint', 0.66, 0.65, 0.6);
       block(m.concrete, W, -half - 0.5, -half, 0, 0.22, ok);
@@ -210,23 +206,12 @@ function* buildRoads(tile, routeGrid) {
         if (!inRun(ok, i)) return;
         const [x, z] = off(p, -half - 0.25);
         m.prop.set('tint', ...(i % 2 ? [0.95, 0.78, 0.12] : [0.92, 0.92, 0.9]));
-        m.prop.box(x, 0.22, z, 0.08, 0.85, 0.08);
+        m.prop.box(x, p.y + 0.22, z, 0.08, 0.85, 0.08);
       });
       m.prop.set('tint', 0.92, 0.92, 0.9);
       block(m.prop, W, -half - 0.29, -half - 0.21, 0.95, 1.05, ok);
       block(m.prop, W, -half - 0.29, -half - 0.21, 0.5, 0.56, ok);
     }
-    if ((r.hw === 'trunk' || r.hw === 'motorway' || r.hw === 'trunk_link') && !src.tunnel) {
-      // Steel W-beam guardrails on posts along both edges of the expressways
-      const W = resamplePolyline(src.pts, 4);
-      for (const side of [1, -1]) {
-        const ok = W.map((p) => { const a = off(p, side * (half + 0.3)); return !coveredByOther(r, a[0], a[1]); });
-        m.prop.set('tint', 0.72, 0.74, 0.76);
-        block(m.prop, W, side * (half + 0.25) - 0.04, side * (half + 0.25) + 0.04, 0.45, 0.8, ok);
-        W.forEach((p, i) => { if (inRun(ok, i)) { const [x, z] = off(p, side * (half + 0.33)); m.prop.box(x, 0, z, 0.1, 0.75, 0.1); } });
-      }
-    }
-
     // Small streets get utility poles & wires (very Seoul)
     if (!src.bridge && !src.tunnel && (r.hw === 'residential' || r.hw === 'service' || r.hw === 'living_street' || r.hw === 'unclassified' || (r.hw === 'tertiary' && half < 5))) {
       smallStreets.push(r);
@@ -236,33 +221,35 @@ function* buildRoads(tile, routeGrid) {
 
   // 3. Crosswalks, stop lines & signal approaches at intersections of streets
   for (const list of nodes.values()) {
-    const ids = new Set(list.filter((e) => !e.r.minor).map((e) => e.r.src.id));
-    if (ids.size < 2) continue;
+    // Arms of the junction (a road passing through counts twice): two pieces of one road meeting is no junction
+    const streets = list.filter((e) => !e.r.minor && !e.r.src.tunnel);
+    const arms = streets.reduce((k, e) => k + (e.i === 0 || e.i === (e.r.src.pts.length >> 1) - 1 ? 1 : 2), 0);
+    if (arms < 3 || new Set(streets.map((e) => e.r.src.id)).size < 2) continue;
     const majors = list.filter((e) => MAJOR.has(e.r.hw)).length;
     for (const e of list) {
       const { r, i } = e;
-      if (!(MARKED.has(r.hw) || (r.hw === 'residential' && r.half >= 3)) || r.src.bridge) continue;
+      if (!(MARKED.has(r.hw) || (r.hw === 'residential' && r.half >= 3)) || r.src.bridge || r.src.tunnel || EXPRESS.has(r.hw)) continue;
       const others = list.filter((o) => o.r !== r && !o.r.minor);
       if (!others.length) continue;
       const R = Math.max(...others.map((o) => o.r.half)) + 1.5;
       const n = r.src.pts.length >> 1;
       for (const dir of [1, -1]) {
         if ((dir > 0 && i >= n - 1) || (dir < 0 && i <= 0)) continue;
-        const c = walkPolyline(r.src.pts, i, dir, R + 2);
+        const c = walkPolyline(r.src.pts, i, dir, R + 2, r.src.ys);
         if (!c || coveredByOther(r, c.x, c.z, -1)) continue;
         // (rx, rz): right of the arm's direction (away from the node)
         const rx = -c.dz, rz = c.dx;
         const h = r.half - 0.3;
-        stripAcross(meshes.paint, c.x, c.z, rx, rz, -h, h, 3.4, WHITE, 1.2, 0.5);
+        stripAcross(meshes.paint, c.x, c.y, c.z, rx, rz, -h, h, 3.4, WHITE, 1.2, 0.5);
         // Traffic coming in along this arm drives towards the node (one-way roads only along their direction)
         const inbound = !r.src.oneway || dir < 0;
         if (!inbound) continue;
-        const sl = walkPolyline(r.src.pts, i, dir, R + 4.6);
+        const sl = walkPolyline(r.src.pts, i, dir, R + 4.6, r.src.ys);
         if (!sl) continue;
         // Its right-hand side is the arm's left: offsets [-half, 0] (two-way) or the whole road (one-way)
-        stripAcross(meshes.paint, sl.x, sl.z, rx, rz, -h, r.src.oneway ? h : -0.3, 0.45, WHITE);
+        stripAcross(meshes.paint, sl.x, sl.y, sl.z, rx, rz, -h, r.src.oneway ? h : -0.3, 0.45, WHITE);
         if (MAJOR.has(r.hw) && majors >= 2 && r.half >= 3) {
-          signalSites.push({ x: sl.x - rx * (r.half + 0.8), z: sl.z - rz * (r.half + 0.8), tx: -sl.dx, tz: -sl.dz, span: r.src.oneway ? r.half * 2 : r.half });
+          signalSites.push({ x: sl.x - rx * (r.half + 0.8), y: sl.y + CURB_H, z: sl.z - rz * (r.half + 0.8), tx: -sl.dx, tz: -sl.dz, span: r.src.oneway ? r.half * 2 : r.half });
         }
       }
     }
@@ -276,35 +263,47 @@ function* buildRoads(tile, routeGrid) {
     const r = visible[seg.ref];
     const len = Math.hypot(seg.bx - seg.ax, seg.bz - seg.az) || 1;
     const dx = (seg.bx - seg.ax) / len, dz = (seg.bz - seg.az) / len;
+    const y = roadYNear(r, pt.x, pt.z);
     for (const s of r.src.oneway ? [1] : [1, -1]) {
       const tx = dx * s, tz = dz * s;
-      signalSites.push({ x: pt.x - tz * (r.half + 0.8), z: pt.z + tx * (r.half + 0.8), tx, tz, span: r.src.oneway ? r.half * 2 : r.half });
+      signalSites.push({ x: pt.x - tz * (r.half + 0.8), y: y + CURB_H, z: pt.z + tx * (r.half + 0.8), tx, tz, span: r.src.oneway ? r.half * 2 : r.half });
     }
-    stripAcross(meshes.paint, pt.x + dx * 3, pt.z + dz * 3, -dz, dx, -r.half + 0.3, r.half - 0.3, 3.4, WHITE, 1.2, 0.5);
+    stripAcross(meshes.paint, pt.x + dx * 3, y, pt.z + dz * 3, -dz, dx, -r.half + 0.3, r.half - 0.3, 3.4, WHITE, 1.2, 0.5);
   }
 
-  return { meshes, grid, roads: visible, walkSites, lampSites, signalSites, smallStreets, bridges };
+  return { meshes, grid, tunnelGrid, roads: visible, walkSites, lampSites, signalSites, smallStreets, bridges, tunnels, coveredByOther };
+}
+
+// Road surface height of r at its sample nearest (x, z)
+function roadYNear(r, x, z) {
+  let best = Infinity, y = 0;
+  for (const p of r.S) {
+    const d = (p.x - x) ** 2 + (p.z - z) ** 2;
+    if (d < best) { best = d; y = p.y; }
+  }
+  return y;
 }
 
 // Paint strip from offset o0 to o1 across a road at (x, z), w m deep along the road (right = (rx, rz)); dash pattern
 // (period, duty) runs across the road (zebra bars)
-function stripAcross(paint, x, z, rx, rz, o0, o1, w, col, period = 1, duty = 1) {
+function stripAcross(paint, x, y, z, rx, rz, o0, o1, w, col, period = 1, duty = 1) {
   const ax = x + rx * o0, az = z + rz * o0, bx = x + rx * o1, bz = z + rz * o1;
-  paintStrip(paint, ax, az, bx, bz, w, col, period, duty, 0);
+  paintStrip(paint, ax, y, az, bx, y, bz, w, col, period, duty, 0);
 }
 
-// Flat paint quad from a to b, w wide, with its dash pattern running from a (js/road-paint.js strip())
-function paintStrip(paint, ax, az, bx, bz, w, col, period, duty, phase) {
+// Paint quad from a to b (on the road surface at ya / yb), w wide, with its dash pattern running from a
+// (js/road-paint.js strip())
+function paintStrip(paint, ax, ya, az, bx, yb, bz, w, col, period, duty, phase) {
   const len = Math.hypot(bx - ax, bz - az);
   if (len < 0.05) return;
   const sx = ((az - bz) / len) * w * 0.5;
   const sz = ((bx - ax) / len) * w * 0.5;
   paint.set('color', ...col);
   const i = [];
-  for (const [x, z, s, u] of [[ax, az, -1, phase], [ax, az, 1, phase], [bx, bz, 1, phase + len], [bx, bz, -1, phase + len]]) {
+  for (const [x, y, z, s, u] of [[ax, ya, az, -1, phase], [ax, ya, az, 1, phase], [bx, yb, bz, 1, phase + len], [bx, yb, bz, -1, phase + len]]) {
     paint.set('side', sx * s, sz * s);
     paint.set('paint', u, period, duty);
-    i.push(paint.vert(x + sx * s, ROAD_Y + PAINT_Y, z + sz * s, 0, 1, 0));
+    i.push(paint.vert(x + sx * s, y + ROAD_Y + PAINT_Y, z + sz * s, 0, 1, 0));
   }
   paint.tri(i[0], i[1], i[2], 0, 1, 0);
   paint.tri(i[0], i[2], i[3], 0, 1, 0);
@@ -319,7 +318,7 @@ function paintRoad(paint, r, S, coveredByOther) {
     for (let i = 0; i + 1 < S.length; i++) {
       const a = off(S[i], o), b = off(S[i + 1], o);
       if (coveredByOther(r, a[0], a[1], 0.4) || coveredByOther(r, b[0], b[1], 0.4)) continue;
-      paintStrip(paint, a[0], a[1], b[0], b[1], w, col, period, duty, S[i].s);
+      paintStrip(paint, a[0], S[i].y, a[1], b[0], S[i + 1].y, b[1], w, col, period, duty, S[i].s);
     }
   };
   if (r.hw === 'busway') {
@@ -327,18 +326,20 @@ function paintRoad(paint, r, S, coveredByOther) {
     along(half - 0.2, 0.18, BLUE);
     return;
   }
+  // No lane changes in tunnels: solid lane lines
+  const dash = src.tunnel ? 1 : 0.4;
   if (src.oneway) {
-    for (let k = 1; k < lanes; k++) along(-half + k * laneW, 0.15, WHITE, 12, 0.4);
+    for (let k = 1; k < lanes; k++) along(-half + k * laneW, 0.15, WHITE, 12, dash);
     if (lanes >= 2 && MAJOR.has(r.hw)) along(-half + 0.3, 0.15, YELLOW);
   } else if (lanes >= 2) {
     along(-0.12, 0.13, YELLOW);
     along(0.12, 0.13, YELLOW);
     const perSide = Math.floor(lanes / 2);
     for (let k = 1; k < perSide; k++) {
-      along(k * laneW, 0.15, WHITE, 12, 0.4);
-      along(-k * laneW, 0.15, WHITE, 12, 0.4);
+      along(k * laneW, 0.15, WHITE, 12, dash);
+      along(-k * laneW, 0.15, WHITE, 12, dash);
     }
   }
 }
 
-export { buildRoads, ROAD_Y, CURB_H };
+export { buildRoads, ribbon, wall, block, off, inRun, ROAD_Y, CURB_H };
