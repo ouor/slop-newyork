@@ -181,7 +181,7 @@ async function initDrive() {
     cabin.update(dt, { lookDX: look.dx, lookDY: look.dy });
     look.dx = 0;
     look.dy = 0;
-    streamer.update(state.position.x, state.position.z);
+    streamer.update(state.position.x, state.position.z, { distance: state.distance, speed: state.speed * timeScale });
     world.update(camera);
     environment.setEnclosure(state.tunnelDepth ?? 0);
     environment.update(dt, camera, state);
