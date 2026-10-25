@@ -118,3 +118,115 @@ test('weather transitions ramp monotonically to their target and stop there', ()
     last = p;
   }
 });
+
+test('tunnel enclosure: identity when open, continuous, darker and lamp-tinted inside, dry road', () => {
+  const base = sky.applyWeather(sky.blendTimeParams(40, TIME_PRESETS), 1, 1);
+  base.roadWetness = 0.9;
+  const at = (t, lamp) => sky.applyEnclosure({ ...base }, t, lamp);
+  assert.deepEqual({ ...at(0) }, { ...base });
+  let prev = at(0);
+  for (let t = 0.01; t <= 1.0001; t += 0.01) {
+    const p = at(t);
+    for (const key of ['sunIntensity', 'envIntensity', 'hemiIntensity', 'roadWetness', 'canyonBounce']) {
+      assert.ok(Math.abs(p[key] - prev[key]) <= 0.05 * Math.max(1, Math.abs(base[key])), `${key} jumps at ${t}`);
+    }
+    assert.ok(p.sunIntensity < prev.sunIntensity && p.envIntensity < prev.envIntensity && p.roadWetness < prev.roadWetness);
+    prev = p;
+  }
+  assert.ok(prev.sunIntensity < 0.06 * base.sunIntensity && prev.envIntensity < 0.21 * base.envIntensity);
+  assert.equal(prev.hemiSky, sky.TUNNEL_LAMPS.led);
+  assert.equal(at(1, sky.TUNNEL_LAMPS.sodium).hemiSky, sky.TUNNEL_LAMPS.sodium);
+  assert.equal(prev.skyExposure, base.skyExposure, 'the sky through the portals keeps its brightness');
+  assert.equal(at(5).sunIntensity, at(1).sunIntensity, 'clamped');
+});
+
+// createEnvironment with three.js, the lighting system, rain and glass stubbed: what reaches the lights per frame
+class Color {
+  constructor(hex = 0) { this.set(hex); }
+  set(hex) {
+    if (typeof hex !== 'number') return this.copy(hex);
+    this.r = ((hex >> 16) & 255) / 255;
+    this.g = ((hex >> 8) & 255) / 255;
+    this.b = (hex & 255) / 255;
+    return this;
+  }
+  copy(c) { this.r = c.r; this.g = c.g; this.b = c.b; return this; }
+  clone() { return new Color().copy(this); }
+  multiplyScalar(s) { this.r *= s; this.g *= s; this.b *= s; return this; }
+  lerp(c, t) { this.r += (c.r - this.r) * t; this.g += (c.g - this.g) * t; this.b += (c.b - this.b) * t; return this; }
+}
+class Vec3 {
+  constructor(x = 0, y = 0, z = 0) { this.set(x, y, z); }
+  set(x, y, z) { this.x = x; this.y = y; this.z = z; return this; }
+  copy(v) { return this.set(v.x, v.y, v.z); }
+  distanceTo(v) { return Math.hypot(this.x - v.x, this.y - v.y, this.z - v.z); }
+}
+
+function stubEnvironment() {
+  const rainAmounts = [];
+  const lighting = {
+    uNightSkyColor: { value: new Color(0x101830) },
+    bakes: 0,
+    applied: null,
+    applyParams(p) { this.applied = { ...p }; },
+    bakeEnvironmentMap() { this.bakes++; }
+  };
+  const { createEnvironment, tunnelUniforms } = loadModule(readFileSync(join(__dirname, '../js/drive/environment.js'), 'utf8'), {
+    imports: {
+      'three/webgpu': { Color, Vector3: Vec3 },
+      'three/tsl': { uniform: (value) => ({ value }) },
+      '../lighting.js': { TIME_PRESETS },
+      './env-sky.js': sky,
+      './weather-rain.js': { createRain: () => ({ mesh: {}, update: (dt, amount) => rainAmounts.push(amount) }) },
+      './weather-windshield.js': { createWindshieldMaterial: stub, createWiper: stub }
+    },
+    filename: 'environment.js'
+  });
+  const env = createEnvironment({ scene: { add() {} }, renderer: null, lighting, route: { origin: { lat: SEOUL[0], lon: SEOUL[1] } } });
+  env.setDate('2026-06-21');
+  env.setTime(13);
+  env.setWeather('rain', true);
+  env.update(1 / 60, null, null);
+  return { env, lighting, rainAmounts, tunnelUniforms };
+}
+
+test('setEnclosure is cheap, reversible and stops the rain, driving the fixture tunnel at 1x and 60x', () => {
+  const { createAutopilot } = loadModule(readFileSync(join(__dirname, '../js/drive/autopilot.js'), 'utf8'), {
+    imports: { 'three/webgpu': { Vector3: Vec3 } },
+    filename: 'autopilot.js'
+  });
+  const route = JSON.parse(readFileSync(join(__dirname, 'fixtures/drive-route.json'), 'utf8'));
+  for (const timeScale of [1, 60]) {
+    const { env, lighting, rainAmounts, tunnelUniforms } = stubEnvironment();
+    const open = lighting.applied;
+    const bakes = lighting.bakes;
+    const pilot = createAutopilot(route);
+    pilot.jumpTo(1700);
+    let prevDepth = 0;
+    let prevSun = open.sunIntensity;
+    let deep = false;
+    while (!pilot.state.finished) {
+      const s = pilot.update(1 / 60, timeScale);
+      env.setEnclosure(s.tunnelDepth, 'sodium');
+      env.update(1 / 60, null, s);
+      const sun = lighting.applied.sunIntensity;
+      assert.ok(Math.abs(sun - prevSun) <= open.sunIntensity * Math.abs(s.tunnelDepth - prevDepth) + 1e-9, `sun jumps at ${s.distance} m`);
+      assert.equal(tunnelUniforms.uEnclosure.value, s.tunnelDepth);
+      if (s.tunnelDepth === 1) {
+        deep = true;
+        assert.equal(rainAmounts[rainAmounts.length - 1], 0, 'no rain under the roof');
+        assert.ok(lighting.applied.envIntensity < 0.21 * open.envIntensity);
+      }
+      prevDepth = s.tunnelDepth;
+      prevSun = sun;
+    }
+    assert.ok(deep, `went through the tunnel at ${timeScale}x`);
+    assert.equal(lighting.bakes, bakes, 'no environment re-bake for the tunnel');
+    assert.equal(rainAmounts[rainAmounts.length - 1], 1, 'rain again after the exit');
+    for (const key of ['sunIntensity', 'hemiIntensity', 'envIntensity', 'hemiSky', 'fogColor', 'roadWetness']) {
+      assert.equal(lighting.applied[key], open[key], `${key} restored after the tunnel`);
+    }
+    assert.ok(Math.abs(tunnelUniforms.uLampColor.value.r - 1) < 1e-9 && tunnelUniforms.uLampColor.value.b < 0.5, 'sodium lamps');
+    assert.throws(() => env.setEnclosure(1, 'neon'));
+  }
+});
