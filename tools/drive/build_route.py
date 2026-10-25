@@ -8,6 +8,9 @@ travel time, scipy), and writes data/drive/<id>/route.json plus one JSON tile pe
       --id seoul-station-gangnam --name "서울역 → 강남역"
   python tools/drive/build_route.py --self-test
 
+Terrain (phase 2, tools/drive/terrain.py): Copernicus GLO-30 tiles covering the route bbox + 15 km are downloaded once
+into --dem-cache; the output gains pathY, tile road ys, building baseY, tiles/<key>.terrain.bin and far.bin.
+
 Passes over the PBF (each ~2-60 s for all of South Korea):
   0. named nodes (only when --from/--to is a name)
   1. tagged point nodes (traffic signals, trees, street lamps)
@@ -33,6 +36,8 @@ from array import array
 
 import numpy as np
 import osmium
+
+import terrain
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
@@ -83,6 +88,10 @@ class Frame:
 def r1(v):
     v = round(v, 1)
     return int(v) if v == int(v) else v
+
+
+def r2(v):
+    return round(float(v), 2)
 
 
 def flat(pts):
@@ -175,11 +184,13 @@ def clip_ring(ring, x0, z0, x1, z1):
 
 
 def split_by_tiles(pts):
-    """Split a polyline at tile borders -> [((tx, tz), [pts])]; border points are shared by both pieces."""
+    """Split a polyline at tile borders -> [((tx, tz), [pts])]; border points are shared by both pieces. Points are
+    (x, z, ...) tuples: extra values (e.g. y) are interpolated at the borders."""
     dense = [pts[0]]
-    for (xa, za), (xb, zb) in zip(pts, pts[1:]):
+    for pa, pb in zip(pts, pts[1:]):
         ts = []
-        for a, b, i in ((xa, xb, 0), (za, zb, 1)):
+        for i in (0, 1):
+            a, b = pa[i], pb[i]
             if a == b:
                 continue
             lo, hi = sorted((a, b))
@@ -188,11 +199,11 @@ def split_by_tiles(pts):
                 ts.append((k * TILE - a) / (b - a))
                 k += 1
         for t in sorted(ts):
-            dense.append((xa + (xb - xa) * t, za + (zb - za) * t))
-        dense.append((xb, zb))
+            dense.append(tuple(u + (v - u) * t for u, v in zip(pa, pb)))
+        dense.append(pb)
     pieces = []
     for a, b in zip(dense, dense[1:]):
-        if a == b:
+        if a[:2] == b[:2]:
             continue
         key = tile_of((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
         if pieces and pieces[-1][0] == key:
@@ -548,6 +559,7 @@ def fill_tiles(pbf, frame, tiles, rels, members, points):
 
     log('pass 5: corridor roads, buildings, areas')
     counts = dict(roads=0, buildings=0, areas=0)
+    roads = []
     flt = osmium.filter.KeyFilter('highway', 'building', 'waterway', *AREA_KEYS)
     for w in way_reader(pbf, flt):
         nodes = w.nodes
@@ -564,18 +576,18 @@ def fill_tiles(pbf, frame, tiles, rels, members, points):
         closed = nodes[0].ref == nodes[-1].ref and n >= 4
         hw = tags.get('highway')
         if hw in TILE_ROADS and tags.get('area') != 'yes':
+            if not any(tiles.get(*k) is not None for k, _ in split_by_tiles(pts)):
+                continue
             a = way_attrs(tags, hw)
+            refs = [nd.ref for nd in nodes if nd.location.valid()]
             if a['_dir'] < 0:
-                pts = pts[::-1]  # oneway=-1: store in driving direction
+                pts, refs = pts[::-1], refs[::-1]  # oneway=-1: store in driving direction
             width = num(tags.get('width'))
             props = {'id': w.id, 'highway': hw, 'name': a['name'], 'lanes': a['lanes'],
                      'width': r1(width or a['lanes'] * LANE_WIDTH), 'oneway': a['oneway'], 'tunnel': a['tunnel'],
                      'bridge': a['bridge'], 'layer': a['layer']}
-            for (tx, tz), piece in split_by_tiles(pts):
-                tile = tiles.get(tx, tz)
-                if tile is not None:
-                    tile['roads'].append({**props, 'pts': flat(piece)})
-                    counts['roads'] += 1
+            roads.append({'props': props, 'refs': refs, 'pts': pts})  # split into tiles once heights are known
+            counts['roads'] += 1
             continue
         if not closed:
             continue
@@ -615,6 +627,148 @@ def fill_tiles(pbf, frame, tiles, rels, members, points):
                 tiles.add_polygon('areas', {'key': kind[0], 'kind': kind[1]}, outer, holes)
                 counts['areas'] += 1
     log(f'  near-corridor features: {counts}')
+    return roads
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Terrain (phase 2)
+# ---------------------------------------------------------------------------------------------------------------------
+
+def build_terrain(args, frame, out, path, refs, segments, signals, tiles, roads):
+    """Road heights, conformed tile grids, building bases and far.bin. Densifies the path (and tile roads) to
+    terrain.SPACING so the vertical profile has points between far-apart OSM nodes; segment / signal indices are
+    remapped. -> path, pathY, segments, signals, route.json `terrain`, {key: tile grid}"""
+    log('terrain: DEM')
+    xs, zs = [p[0] for p in path], [p[1] for p in path]
+    step = terrain.FAR_STEP
+    fx0 = math.floor((min(xs) - terrain.FAR_MARGIN) / step) * step
+    fz0 = math.floor((min(zs) - terrain.FAR_MARGIN) / step) * step
+    nx = math.ceil((max(xs) + terrain.FAR_MARGIN - fx0) / step) + 1
+    nz = math.ceil((max(zs) + terrain.FAR_MARGIN - fz0) / step) + 1
+    dem = terrain.Dem(args.dem_cache, frame,
+                      terrain.tiles_for_bbox(frame, fx0, fz0, fx0 + (nx - 1) * step, fz0 + (nz - 1) * step), log)
+    dem.prefetch()
+    dem.urban = terrain.urban_weight(list(tiles.data.values()), TILE)
+    log(f'  built-up weight: {np.count_nonzero(dem.urban[2] > 0.5)} of {dem.urban[2].size} cells')
+
+    log('terrain: road heights')
+    net = terrain.RoadNet()
+    tunnel_ends = set()
+    for r in roads:
+        p = r['props']
+        r['ids'], r['dense'], _ = net.add(r['refs'], r['pts'], p['highway'], p['bridge'], p['tunnel'])
+        if p['tunnel']:
+            tunnel_ends.update((r['refs'][0], r['refs'][-1]))
+    route_ways = []
+    for s in segments:
+        ids, dense, _ = net.add(refs[s['i0']:s['i1'] + 1], path[s['i0']:s['i1'] + 1], s['highway'], s['bridge'],
+                                s['tunnel'])
+        route_ways.append((s, ids, dense))
+        if s['tunnel']:
+            tunnel_ends.update((refs[s['i0']], refs[s['i1']]))
+    y = net.solve(dem.ground, log=log)
+
+    keys, dpath, where = terrain.densify(refs, path)
+    path_y = [float(y[net.index[k]]) for k in keys]
+    segments = [{**s, 'i0': where[s['i0']], 'i1': where[s['i1']]} for s in segments]
+    signals = [where[k] for k in signals]
+    log(f'  path densified {len(path)} -> {len(dpath)} points')
+
+    for r in roads:
+        p = r['props']
+        pts3 = [(x, z, y[i]) for (x, z), i in zip(r['dense'], r['ids'])]
+        for (tx, tz), piece in split_by_tiles(pts3):
+            tile = tiles.get(tx, tz)
+            if tile is not None:
+                tile['roads'].append({**p, 'pts': flat([q[:2] for q in piece]), 'ys': [r2(q[2]) for q in piece]})
+
+    log('terrain: conformed tile grids')
+    REACH = 80.0   # m beyond the flat zone: cuts / fills up to 40 m deep blend in (deeper ones end in a step)
+    conform_ways = []   # (priority, way) for every road the ground meets
+    for r in roads:
+        p = r['props']
+        if not p['tunnel']:   # bridges first: only trim the ground poking through their decks
+            conform_ways.append(((-1 if p['bridge'] else 0, terrain.RANK.get(p['highway'], 0), p['layer']), {
+                'pts': np.array(r['dense']), 'ys': y[r['ids']], 'half': p['width'] / 2, 'under': p['bridge'],
+                'portal0': r['refs'][0] in tunnel_ends, 'portal1': r['refs'][-1] in tunnel_ends}))
+    for s, ids, dense in route_ways:
+        if not s['tunnel']:
+            conform_ways.append(((-1 if s['bridge'] else 1, 0, 0), {
+                'pts': np.array(dense), 'ys': y[ids], 'half': s['lanes'] * LANE_WIDTH / 2, 'under': s['bridge'],
+                'portal0': refs[s['i0']] in tunnel_ends, 'portal1': refs[s['i1']] in tunnel_ends}))
+    conform_ways.sort(key=lambda e: e[0])
+    by_tile = {}
+    for _prio, w in conform_ways:
+        w['half'] += terrain.SHOULDER + terrain.GRID_SLACK
+        # one reach everywhere: neighbouring tiles must compute identical heights on their shared edge
+        w['reach'] = REACH
+        ext = w['half'] + REACH
+        (x0, z0), (x1, z1) = w['pts'].min(axis=0) - ext, w['pts'].max(axis=0) + ext
+        for tx in range(math.floor(x0 / TILE), math.floor(x1 / TILE) + 1):
+            for tz in range(math.floor(z0 / TILE), math.floor(z1 / TILE) + 1):
+                if tiles.get(tx, tz) is not None:
+                    by_tile.setdefault(key_of(tx, tz), []).append(w)
+    n = terrain.TILE_N
+    grids = {}
+    for key, tile in tiles.data.items():
+        tx0, tz0 = tile['tx'] * TILE, tile['tz'] * TILE
+        gx, gz = np.meshgrid(tx0 + np.arange(n) * TILE / (n - 1), tz0 + np.arange(n) * TILE / (n - 1))
+        G = dem.ground(gx.ravel(), gz.ravel()).reshape(n, n)
+        grids[key] = terrain.conform(tx0, tz0, TILE, G, by_tile.get(key, []))
+        for b in tile['buildings']:
+            # shortcut: footprints reaching into the next tile are sampled clamped to this tile's grid
+            bx, bz = b['pts'][0::2], b['pts'][1::2]
+            b['baseY'] = r1(float(terrain.sample_grid(grids[key], tx0, tz0, TILE,
+                                                      bx + [sum(bx) / len(bx)], bz + [sum(bz) / len(bz)]).min()))
+
+    seam = 0.0   # neighbouring grids share their edge samples: they must agree
+    for key, tile in tiles.data.items():
+        for dx, dz, a, b in ((1, 0, np.s_[:, -1], np.s_[:, 0]), (0, 1, np.s_[-1, :], np.s_[0, :])):
+            other = grids.get(key_of(tile['tx'] + dx, tile['tz'] + dz))
+            if other is not None:
+                seam = max(seam, float(np.abs(grids[key][a] - other[b]).max()))
+    log(f'  tile edge mismatch {seam:.3f} m')
+    assert seam < 0.01, 'conformed tile grids disagree on a shared edge'
+
+    log('terrain: far grid')
+    fgx, fgz = np.meshgrid(fx0 + np.arange(nx) * step, fz0 + np.arange(nz) * step)
+    terrain.to_dm(dem.far(fgx.ravel(), fgz.ravel())).astype('<i2').tofile(os.path.join(out, 'far.bin'))
+    meta = {'tileN': n, 'far': {'url': 'far.bin', 'minX': r1(fx0), 'minZ': r1(fz0), 'step': int(step),
+                                'nx': nx, 'nz': nz}, 'attribution': terrain.ATTRIBUTION}
+    profile_report(dpath, path_y, segments, dem)
+    return dpath, path_y, segments, signals, meta, grids
+
+
+def profile_report(path, path_y, segments, dem):
+    """Sanity numbers on the route profile: steps, grades, tunnel cover, bridge clearance."""
+    P = np.array(path)
+    Y = np.array(path_y)
+    l = np.hypot(*np.diff(P, axis=0).T)
+    dy = np.diff(Y)
+    steps = np.abs(dy[l < 0.5])
+    grade = np.abs(dy) / np.maximum(l, 1e-9)
+    G = dem.ground(P[:, 0], P[:, 1])
+    log(f'  profile: y {Y.min():.1f} .. {Y.max():.1f} m, max step at coincident points '
+        f'{steps.max() if len(steps) else 0:.3f} m')
+    for name, classes in (('motorway/trunk', ('motorway', 'trunk')), ('other', None)):
+        m = np.zeros(len(l), bool)
+        for s in segments:
+            if (s['highway'] in classes) if classes else (s['highway'] not in ('motorway', 'trunk')):
+                m[s['i0']:s['i1']] = True
+        m &= l >= 1
+        if m.any():
+            g = grade[m]
+            log(f'  grade {name}: max {g.max() * 100:.1f} %, p99 {np.percentile(g, 99) * 100:.1f} %, '
+                f'{l[m][g > 0.06].sum() / 1000:.2f} km over 6 %')
+    for kind in ('tunnel', 'bridge'):
+        segs = [s for s in segments if s[kind]]
+        if not segs:
+            continue
+        idx = np.concatenate([np.arange(s['i0'], s['i1'] + 1) for s in segs])
+        d = (G[idx] - Y[idx]) if kind == 'tunnel' else (Y[idx] - G[idx])
+        what = 'cover (terrain above)' if kind == 'tunnel' else 'clearance (deck above ground)'
+        log(f'  {len(segs)} {kind} segments, {len(idx)} points: {what} min {d.min():.1f} m, median '
+            f'{np.median(d):.1f} m, {np.count_nonzero(d < 0) / len(d) * 100:.0f} % negative')
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -655,30 +809,37 @@ def build(args):
     length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(path, path[1:]))
     log(f'route {length / 1000:.2f} km, {len(path)} points, {len(seg_out)} segments, {len(signals)} signals')
 
+    refs = [int(g['ids'][i]) for i in nodes]
+    del g
+
     tiles = Tiles(corridor_tiles(path))
     log(f'corridor: {len(tiles.keys)} tiles')
     rels, members = read_relations(args.pbf)
-    fill_tiles(args.pbf, frame, tiles, rels, members, points)
+    roads = fill_tiles(args.pbf, frame, tiles, rels, members, points)
+    del rels, members, points
 
     out = os.path.join(args.out, args.id)
     if os.path.isdir(os.path.join(out, 'tiles')):
         shutil.rmtree(os.path.join(out, 'tiles'))
     os.makedirs(os.path.join(out, 'tiles'), exist_ok=True)
+    path, path_y, seg_out, signals, terrain_meta, grids = build_terrain(args, frame, out, path, refs, seg_out,
+                                                                       signals, tiles, roads)
     route_json = {
-        'version': 1, 'id': args.id, 'name': args.name or f'{fname or args.from_} → {tname or args.to}',
+        'version': 2, 'id': args.id, 'name': args.name or f'{fname or args.from_} → {tname or args.to}',
         'from': {'name': fname, 'lat': flat_, 'lon': flon}, 'to': {'name': tname, 'lat': tlat, 'lon': tlon},
         'origin': {'lat': flat_, 'lon': flon}, 'lengthM': r1(length), 'tileSize': int(TILE),
-        'path': flat(path), 'segments': seg_out, 'signals': signals, 'tiles': list(tiles.keys),
+        'path': flat(path), 'pathY': [r2(v) for v in path_y], 'segments': seg_out, 'signals': signals,
+        'tiles': list(tiles.keys), 'terrain': terrain_meta,
     }
     dump = lambda obj: json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
     with open(os.path.join(out, 'route.json'), 'w', encoding='utf-8') as f:
         f.write(dump(route_json))
-    total = os.path.getsize(os.path.join(out, 'route.json'))
     for key, tile in tiles.data.items():
         p = os.path.join(out, 'tiles', key + '.json')
         with open(p, 'w', encoding='utf-8') as f:
             f.write(dump(tile))
-        total += os.path.getsize(p)
+        terrain.to_dm(grids[key]).astype('<i2').tofile(os.path.join(out, 'tiles', key + '.terrain.bin'))
+    total = sum(e.stat().st_size for d in (out, os.path.join(out, 'tiles')) for e in os.scandir(d) if e.is_file())
 
     check(route_json, tiles)
     nb = [len(t['buildings']) for t in tiles.data.values()]
@@ -706,6 +867,10 @@ def check(route_json, tiles):
     log(f'check: longest path step {max(gaps):.0f} m')
     for i in range(n):
         assert tiles.get(*tile_of(path[2 * i], path[2 * i + 1])) is not None, f'path point {i} outside the corridor'
+    assert len(route_json['pathY']) == n, 'pathY must have one height per path point'
+    for t in tiles.data.values():
+        assert all(len(r['ys']) * 2 == len(r['pts']) for r in t['roads']), 'road ys must match pts'
+        assert all('baseY' in b for b in t['buildings'])
 
 
 def self_test():
@@ -717,12 +882,15 @@ def self_test():
     assert abs(abs(signed_area(c)) - 500 * 100) < 1e-6
     pieces = split_by_tiles([(-10, 10), (510, 10), (510, 520)])
     assert [k for k, _ in pieces] == [(-1, 0), (0, 0), (1, 0), (1, 1)] and pieces[1][1] == [(0, 10), (500, 10)]
+    pieces = split_by_tiles([(-10, 0, 1.0), (490, 0, 51.0)])   # extra values are interpolated at the border
+    assert pieces[0][1][-1] == (0, 0, 2.0) and pieces[1][1][0] == (0, 0, 2.0)
     rings = assemble_rings([([1, 2, 3], [(0, 0), (1, 0), (1, 1)]), ([1, 4, 3], [(0, 0), (0, 1), (1, 1)])])
     assert len(rings) == 1 and len(rings[0]) == 4
     a = way_attrs({'oneway': '-1', 'lanes': '3', 'maxspeed': '60'}, 'primary')
     assert a['_dir'] == -1 and a['lanes'] == 3 and a['lanesTagged'] and a['maxspeed'] == 60
     assert way_attrs({}, 'motorway')['oneway'] and not way_attrs({}, 'residential')['maxspeedTagged']
     print('self-test ok')
+    terrain.self_test()
 
 
 def main():
@@ -733,6 +901,8 @@ def main():
     ap.add_argument('--id')
     ap.add_argument('--name')
     ap.add_argument('--out', default='data/drive')
+    ap.add_argument('--dem-cache', default=r'C:\Users\ouor\Downloads\_\dem-copernicus',
+                    help='folder of Copernicus GLO-30 tiles (missing ones are downloaded)')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
     if args.self_test:

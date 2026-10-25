@@ -136,7 +136,7 @@ test('every route tile builds roads & ground, and the asphalt covers the whole r
   const routeGrid = new geo.SegmentGrid(20);
   routeGrid.add(route.path, 2.5, 0);
   const grids = new Map();
-  for (const file of readdirSync(join(dir, 'tiles'))) {
+  for (const file of readdirSync(join(dir, 'tiles')).filter((f) => f.endsWith('.json'))) { // skip <key>.terrain.bin
     const tile = JSON.parse(readFileSync(join(dir, 'tiles', file), 'utf8'));
     const roads = finish(roadsModule.buildRoads(tile, routeGrid));
     grids.set(`${tile.tx}_${tile.tz}`, roads.grid);
